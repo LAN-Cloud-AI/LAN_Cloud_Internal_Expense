@@ -1,0 +1,26 @@
+# Dependencies and local tooling state
+node_modules/
+app/node_modules/
+.wrangler/
+app/.wrangler/
+
+# Generated bundles and local test/build artifacts
+app/dist/
+build/
+
+# Local authorization helpers and ephemeral planning material
+auth_*.png
+base_build_plan.md
+
+# Secrets and machine-specific files
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+.DS_Store

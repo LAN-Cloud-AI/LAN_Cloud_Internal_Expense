@@ -1,0 +1,27 @@
+{
+  "name": "lan-cloud-internal-expense",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "兰芯云朵行政——订阅资产管理系统（Cloudflare Workers + D1 + R2 全栈）",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && wrangler deploy --dry-run --outdir dist",
+    "db:migrations:local": "wrangler d1 migrations apply DB --local",
+    "db:migrations:list": "wrangler d1 migrations list DB --local",
+    "db:seed:local": "wrangler d1 migrations apply DB --local"
+  },
+  "dependencies": {
+    "hono": "^4.8.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260721.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.2.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.24.3"
+  }
+}

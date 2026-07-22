@@ -1,0 +1,33 @@
+{
+  // 安全预部署：先创建 Worker 与绑定，但不公开 workers.dev 或业务域名。
+  "name": "lan-cloud-internal-expense",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "account_id": "889e913c81be632234cb26e2b75b0b9a",
+  "workers_dev": false,
+  "vars": {
+    "ENVIRONMENT": "production",
+    "APP_ORIGIN": "https://ie_oa.lancloudtech.com",
+    "FX_PROVIDER": "frankfurter-ecb",
+    "FX_PROVIDER_URL": "https://api.frankfurter.dev/v1/latest",
+    "FX_CURRENCIES": "USD,EUR,HKD,JPY",
+    "FEISHU_IMPORT_ENABLED": "0"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lan-cloud-expense",
+      "database_id": "b67c7b23-30ed-4077-b5d2-9452d2e69578",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RECEIPTS_BUCKET",
+      "bucket_name": "lan-cloud-expense-receipts"
+    }
+  ],
+  "triggers": {
+    "crons": ["0 1 * * *"]
+  }
+}

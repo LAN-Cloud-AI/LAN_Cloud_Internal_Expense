@@ -1,0 +1,67 @@
+{
+  // 兰芯云朵行政——订阅资产管理系统 · Worker 生产配置
+  // 凭据只通过 Cloudflare Workers Secrets 注入，绝不写入本文件。
+  "name": "lan-cloud-internal-expense",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "account_id": "889e913c81be632234cb26e2b75b0b9a",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "ie-oa.lancloudtech.com/*",
+      "zone_name": "lancloudtech.com"
+    },
+    {
+      // 一级子域由 Cloudflare Universal SSL 覆盖；保持普通 Worker route，不使用 Custom Domain/ACM。
+      "pattern": "external-ie-oa.lancloudtech.com/*",
+      "zone_name": "lancloudtech.com"
+    },
+    {
+      // 旧入口只在 Worker 内安全迁移 GET/HEAD；写请求不跨 host 重放。
+      "pattern": "ie_oa.lancloudtech.com/*",
+      "zone_name": "lancloudtech.com"
+    }
+  ],
+  "vars": {
+    // production 下只接受经 Cloudflare Access 验签的登录身份。
+    "ENVIRONMENT": "production",
+    "APP_ORIGINS": "https://ie-oa.lancloudtech.com,https://external-ie-oa.lancloudtech.com",
+    // ECB 数据源：Worker 每天 01:00 UTC 记录配置货币兑 CNY 的汇率。
+    "FX_PROVIDER": "frankfurter-ecb",
+    "FX_PROVIDER_URL": "https://api.frankfurter.dev/v1/latest",
+    "FX_CURRENCIES": "USD,EUR,HKD,JPY",
+    // 默认关闭：只有独立的飞书自建应用已被授予目标 Base 只读权限时才置为 "1"。
+    "FEISHU_IMPORT_ENABLED": "0"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lan-cloud-expense",
+      "database_id": "b67c7b23-30ed-4077-b5d2-9452d2e69578",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      // API 创建桶名与此处保持一致。
+      "binding": "RECEIPTS_BUCKET",
+      "bucket_name": "lan-cloud-expense-receipts"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      // 每日 01:00 UTC 抓取汇率（provider 未配置时仅记录失败 sync_run，不造假数据）
+      "0 1 * * *"
+    ]
+  }
+  // Workers secrets（以 API / `wrangler secret put` 配置，代码零硬编码）：
+  //   ACCESS_AUD_CORPORATE  企业入口 Access Application 的 audience
+  //   ACCESS_AUD_EXTERNAL   外部入口 Access Application 的 audience
+  //   ACCESS_ISSUER         Access organization issuer
+  //   ACCESS_JWKS_URL       Access organization JWKs URL
+  //   MIGRATION_SYSTEM_ADMIN_EMAIL  仅一次企业管理员迁移，成功验证后立即删除
+  //   FX_API_KEY          汇率 provider API Key（若服务商要求）
+  //   FEISHU_APP_ID       飞书应用 App ID（只读导入）
+  //   FEISHU_APP_SECRET   飞书应用 App Secret
+  //   FEISHU_BASE_TOKEN   原多维表格 app_token（只读数据源）
+}
