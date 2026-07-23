@@ -373,8 +373,11 @@ curl -I https://ie_oa.lancloudtech.com/
 
 | 项目 | 结果（执行后填写） |
 | --- | --- |
-| 日期 / Worker version | 2026-07-22 / `6bc43be7-9649-4637-a899-a87db1b8b72e` |
+| 日期 / Worker version | 2026-07-22 / `a7f0e56c-a8a7-4bc4-b8e4-bd68809e1c21` |
 | Corporate / External Access App 与 policy ID | 企业入口保持既有已验证配置；新外部入口已创建并回验为仅 Cloudflare、GitHub 两个登录方法（标识符保留在私有部署证据中） |
-| D1 migration 状态 | 既有 remote migration 已无待执行项；本次仅切换外部入口，不改动账本结构 |
+| D1 migration 状态 | remote 已执行至 `0007_drop_vendors.sql`（执行前确认 vendors 表与 vendor_id 引用均为空）；无待执行项 |
 | 三 host Access 边缘检查 | `ie-oa`、`external-ie-oa`、`ie_oa` 均为 TLS 校验通过且 Access `302` |
+| 本次变更内容 | 飞书正式导入 apply（预览→审批→受控导入）、页面登出入口、供应商维度移除（账本列与表单）、关联字段下拉选择 |
 | 企业开通、绑定、撤销与 employee 隔离 | 待指定企业管理员完成真实浏览器登录与绑定/撤销验收；在此之前保留迁移管理员 secret |
+| 外部入口退役（2026-07-23） | 系统改为仅企业 OTP 登录：Worker 外部路由与绑定体系已下线（版本 `cbcff839`），迁移 `0011` 已删身份链接交易与外部绑定身份。待控制台手工收尾：删除 external-ie-oa 的 Access 应用与 DNS 记录；企业应用 IdP 只保留 One-time PIN；session duration 设为 720h（30 天） |
+| 企业 Access 应用误删恢复（2026-07-23） | 已通过 API 重建企业应用（id `54d008f7-a2fe-431a-ba01-03b025860ebd`）：目的地 ie-oa + ie_oa、仅 One-time PIN IdP、session 720h、`email_domain lancloudtech.com` 唯一 Allow policy；新 AUD 已写入 `ACCESS_AUD_CORPORATE` secret，双域名 302 挑战已回验恢复 |

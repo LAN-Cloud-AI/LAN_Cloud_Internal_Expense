@@ -65,7 +65,7 @@ describe('buildAccrualCandidates', () => {
 });
 
 describe('buildActualBillCandidates', () => {
-  it('只为上次已报销日之后、截至日前已到期的完整账单生成候选', () => {
+  it('只为上次已报销日之后、账期已开始（真实付款已产生）的账单生成全额候选', () => {
     const candidates = buildActualBillCandidates({
       subscriptionId: 'sub-bill',
       payerId: 'payer-a',
@@ -93,6 +93,121 @@ describe('buildActualBillCandidates', () => {
         cnyAmountFen: 10_500,
       }),
     ]);
+  });
+
+  it.each([
+    { cycle: 'monthly', expected: [['2026-05-20', '2026-06-19'], ['2026-06-20', '2026-07-19'], ['2026-07-20', '2026-08-19']] },
+    { cycle: 'quarterly', expected: [['2026-05-20', '2026-08-19']] },
+    { cycle: 'yearly', expected: [['2026-05-20', '2027-05-19']] },
+  ] as const)('订阅开始日即锚点的 %s 订阅：账期开始即全额入账，周期整期连续覆盖', ({ cycle, expected }) => {
+    const candidates = buildActualBillCandidates({
+      subscriptionId: 'sub-cycles',
+      payerId: 'payer-a',
+      currency: 'CNY',
+      amountMinor: 1_200,
+      billingCycle: cycle,
+      billingAnchorDate: '2026-05-20',
+      subscriptionStartDate: '2026-05-20',
+      cutoffDate: '2026-07-22',
+      rate: { numerator: 1, denominator: 1 },
+    });
+
+    expect(candidates.map((candidate) => [candidate.coverageStart, candidate.coverageEnd])).toEqual(expected);
+    expect(candidates.every((candidate) => candidate.originalAmountMinor === 1_200)).toBe(true);
+    expect(candidates.every((candidate) => candidate.coverageStart <= '2026-07-22')).toBe(true);
+  });
+
+  it('覆盖开始日晚于截止日的周期一律不生成（尚无真实付款）', () => {
+    const candidates = buildActualBillCandidates({
+      subscriptionId: 'sub-future',
+      payerId: 'payer-a',
+      currency: 'CNY',
+      amountMinor: 1_200,
+      billingCycle: 'monthly',
+      billingAnchorDate: '2026-08-01',
+      subscriptionStartDate: '2026-08-01',
+      cutoffDate: '2026-07-22',
+      rate: { numerator: 1, denominator: 1 },
+    });
+
+    expect(candidates).toEqual([]);
+  });
+
+  it('一次性订阅只在开始日产生一条全额候选', () => {
+    const candidates = buildActualBillCandidates({
+      subscriptionId: 'sub-once',
+      payerId: 'payer-a',
+      currency: 'CNY',
+      amountMinor: 59_600,
+      billingCycle: 'one_time',
+      billingAnchorDate: '2026-06-01',
+      subscriptionStartDate: '2026-06-01',
+      cutoffDate: '2026-07-22',
+      rate: { numerator: 1, denominator: 1 },
+    });
+
+    expect(candidates).toEqual([
+      expect.objectContaining({ coverageStart: '2026-06-01', coverageEnd: '2026-06-01', originalAmountMinor: 59_600, cnyAmountFen: 59_600 }),
+    ]);
+  });
+
+  it('订阅开始日晚于账期锚点时，首期按天折算且不丢天数', () => {
+    const candidates = buildActualBillCandidates({
+      subscriptionId: 'sub-partial',
+      payerId: 'payer-a',
+      currency: 'CNY',
+      amountMinor: 3_100,
+      billingCycle: 'monthly',
+      billingAnchorDate: '2026-05-01',
+      subscriptionStartDate: '2026-05-20',
+      cutoffDate: '2026-06-30',
+      rate: { numerator: 1, denominator: 1 },
+    });
+
+    expect(candidates.map((candidate) => [candidate.coverageStart, candidate.coverageEnd, candidate.originalAmountMinor])).toEqual([
+      ['2026-05-20', '2026-05-31', 1_200],
+      ['2026-06-01', '2026-06-30', 3_100],
+    ]);
+  });
+
+  it('上次报销水位落在账期中段时，续报首期按天折算剩余部分', () => {
+    const candidates = buildActualBillCandidates({
+      subscriptionId: 'sub-resume',
+      payerId: 'payer-a',
+      currency: 'CNY',
+      amountMinor: 3_100,
+      billingCycle: 'monthly',
+      billingAnchorDate: '2026-01-01',
+      subscriptionStartDate: '2026-01-01',
+      lastReimbursedThrough: '2026-01-15',
+      cutoffDate: '2026-02-28',
+      rate: { numerator: 1, denominator: 1 },
+    });
+
+    expect(candidates.map((candidate) => [candidate.coverageStart, candidate.coverageEnd, candidate.originalAmountMinor])).toEqual([
+      ['2026-01-16', '2026-01-31', 1_600],
+      ['2026-02-01', '2026-02-28', 3_100],
+    ]);
+  });
+
+  it('水位连续推进时同一期不会被重复报销', () => {
+    const base = {
+      subscriptionId: 'sub-chain',
+      payerId: 'payer-a',
+      currency: 'CNY',
+      amountMinor: 3_100,
+      billingCycle: 'monthly' as const,
+      billingAnchorDate: '2026-05-01',
+      subscriptionStartDate: '2026-05-20',
+      rate: { numerator: 1, denominator: 1 },
+    };
+    const first = buildActualBillCandidates({ ...base, cutoffDate: '2026-06-30' });
+    const second = buildActualBillCandidates({ ...base, lastReimbursedThrough: '2026-05-31', cutoffDate: '2026-06-30' });
+    const third = buildActualBillCandidates({ ...base, lastReimbursedThrough: '2026-06-30', cutoffDate: '2026-07-22' });
+
+    expect(first.map((c) => c.coverageEnd)).toEqual(['2026-05-31', '2026-06-30']);
+    expect(second.map((c) => [c.coverageStart, c.coverageEnd])).toEqual([['2026-06-01', '2026-06-30']]);
+    expect(third.map((c) => [c.coverageStart, c.coverageEnd, c.originalAmountMinor])).toEqual([['2026-07-01', '2026-07-31', 3_100]]);
   });
 });
 

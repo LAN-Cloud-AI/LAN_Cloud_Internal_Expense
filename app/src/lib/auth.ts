@@ -1,5 +1,5 @@
 import type { Env } from './types';
-import { isCorporateEmail, type AccessEntry } from './access-entry';
+import { normalizeVerifiedEmail, type AccessEntry } from './access-entry';
 
 export const APP_ROLES = [
   'system_admin',
@@ -128,31 +128,6 @@ export async function verifyCloudflareAccessJwt(
 }
 
 /**
- * Reads Cloudflare's same-host identity metadata after JWT verification. This
- * is deliberately advisory display/audit data; authorization uses only the
- * signed issuer and subject resolved by the identity store.
- */
-export async function resolveAccessProviderHint(
-  request: Request,
-  fetcher: typeof fetch = fetch,
-): Promise<'cloudflare' | 'github' | null> {
-  const assertion = request.headers.get('Cf-Access-Jwt-Assertion');
-  if (!assertion) return null;
-  try {
-    const url = new URL('/cdn-cgi/access/get-identity', request.url);
-    const response = await fetcher(url, {
-      headers: { 'Cf-Access-Jwt-Assertion': assertion },
-    });
-    if (response.status !== 200) return null;
-    const body = await response.json() as { idp?: { type?: unknown } };
-    if (body.idp?.type === 'cloudflare' || body.idp?.type === 'github') return body.idp.type;
-  } catch {
-    // Provider detection must fail closed to null and never affect authorization.
-  }
-  return null;
-}
-
-/**
  * Resolves a principal. Development mode intentionally requires a configured
  * DEV_AUTH flag; production accepts only a verified Cloudflare Access JWT.
  */
@@ -181,13 +156,14 @@ export async function resolveAuthenticatedIdentity(
 /**
  * Applies entry-specific requirements only to an identity that has already
  * passed Access signature, issuer, audience, and expiry validation.
+ * 企业入口要求已验证邮箱（不限域名）；谁能自动开户由 D1 登录白名单决定。
  */
 export function validateIdentityForEntry(
   identity: AuthenticatedIdentity,
   entry: AccessEntry,
 ): AuthenticatedIdentity {
-  if ((entry.kind === 'corporate' || entry.kind === 'legacy') && !isCorporateEmail(identity.email)) {
-    throw new Error('corporate Access identity requires a lancloudtech.com email');
+  if ((entry.kind === 'corporate' || entry.kind === 'legacy') && !normalizeVerifiedEmail(identity.email)) {
+    throw new Error('corporate Access identity requires a verified email');
   }
   return identity;
 }

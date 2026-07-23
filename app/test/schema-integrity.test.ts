@@ -40,12 +40,11 @@ function seedLedger(database: Database.Database): void {
       VALUES
         ('a-b', 'c', '历史用户 A'),
         ('a', 'b-c', '历史用户 B');
-    INSERT INTO vendors (id, name) VALUES ('vendor-1', 'Example Vendor');
     INSERT INTO payers (id, display_name, active_from) VALUES
       ('payer-a', '付款者 A', '2026-01-01'),
       ('payer-b', '付款者 B', '2026-01-01');
-    INSERT INTO subscriptions (id, name, vendor_id, owner_user_id)
-      VALUES ('subscription-1', '订阅 1', 'vendor-1', 'user-1');
+    INSERT INTO subscriptions (id, name, owner_user_id)
+      VALUES ('subscription-1', '订阅 1', 'user-1');
     INSERT INTO subscription_term_versions (
       id, subscription_id, effective_start, billing_cycle, settlement_mode,
       billing_anchor_date, original_currency, amount_minor
@@ -195,7 +194,7 @@ describe('访问身份与绑定事务完整性约束', () => {
     expect(() => insertIdentity('identity-c', 'user-1', 'https://issuer', 'different-subject')).toThrow();
   });
 
-  it('仅保存绑定码哈希，并为历史 external_subject 回填独立的 legacy 身份', () => {
+  it('为历史 external_subject 回填独立的 legacy 身份', () => {
     const database = createDatabase();
     const legacyIdentity = database.prepare(
       `SELECT user_id, issuer, subject, identity_kind
@@ -220,34 +219,17 @@ describe('访问身份与绑定事务完整性约束', () => {
       { id: 'legacy-612D62-63', user_id: 'a-b', subject: 'c' },
     ]);
     expect(new Set(ambiguousLegacyPairs.map((identity) => identity.id)).size).toBe(2);
-
-    database.prepare(
-      `INSERT INTO identity_link_transactions (
-        id, user_id, initiator_identity_id, secret_hash, status, expires_at
-      ) VALUES (?, ?, ?, ?, 'pending', ?)`,
-    ).run('link-1', 'user-1', 'legacy-757365722D31-6163636573732D7375626A6563742D31', 'hash-only', '2026-12-31T23:59:59Z');
-
-    expect(database.prepare(
-      'SELECT secret_hash FROM identity_link_transactions WHERE id = ?',
-    ).get('link-1')).toMatchObject({ secret_hash: 'hash-only' });
-
-    const columns = database.prepare(
-      'PRAGMA table_info(identity_link_transactions)',
-    ).all() as Array<{ name: string }>;
-    const columnNames = columns.map((column) => column.name);
-    expect(columnNames).not.toContain('secret');
-    expect(columnNames).not.toContain('raw_code');
   });
 
   it('允许不同用户的不同身份使用相同已验证邮箱', () => {
     const database = createDatabase();
-    const insertLinkedIdentity = (id: string, userId: string, issuer: string, subject: string) => database.prepare(
+    const insertCorporateIdentity = (id: string, userId: string, issuer: string, subject: string) => database.prepare(
       `INSERT INTO user_access_identities (
         id, user_id, issuer, subject, verified_email, identity_kind, provider_hint
-      ) VALUES (?, ?, ?, ?, 'shared@lancloudtech.com', 'linked_external', 'github')`,
+      ) VALUES (?, ?, ?, ?, 'shared@lancloudtech.com', 'corporate_primary', 'cloudflare')`,
     ).run(id, userId, issuer, subject);
 
-    insertLinkedIdentity('identity-email-a', 'user-1', 'https://github.com', 'github-user-a');
-    expect(() => insertLinkedIdentity('identity-email-b', 'user-2', 'https://github.com', 'github-user-b')).not.toThrow();
+    insertCorporateIdentity('identity-email-a', 'user-1', 'https://github.com', 'github-user-a');
+    expect(() => insertCorporateIdentity('identity-email-b', 'user-2', 'https://github.com', 'github-user-b')).not.toThrow();
   });
 });

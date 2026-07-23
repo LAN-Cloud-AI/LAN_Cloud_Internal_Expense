@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  resolveAccessProviderHint,
   resolveAuthenticatedIdentity,
   validateAccessClaims,
   validateIdentityForEntry,
@@ -63,79 +62,12 @@ describe('validateAccessClaims', () => {
   });
 });
 
-describe('resolveAccessProviderHint', () => {
-  it('uses same-host Access identity metadata only as an advisory provider hint', async () => {
-    const request = new Request('https://external-ie-oa.lancloudtech.com/api/session', {
-      headers: { 'Cf-Access-Jwt-Assertion': 'verified-assertion' },
-    });
-    const fetcher: typeof fetch = async (input, init) => {
-      expect(input.toString()).toBe('https://external-ie-oa.lancloudtech.com/cdn-cgi/access/get-identity');
-      expect(new Headers(init?.headers).get('Cf-Access-Jwt-Assertion')).toBe('verified-assertion');
-      return new Response(JSON.stringify({ idp: { type: 'github' } }), { status: 200 });
-    };
-    await expect(resolveAccessProviderHint(request, fetcher)).resolves.toBe('github');
-    await expect(resolveAccessProviderHint(request, async () => (
-      new Response(JSON.stringify({ idp: { type: 'unrecognized' } }), { status: 200 })
-    ))).resolves.toBeNull();
-  });
-
-  it('returns null for non-200, malformed, and failed provider responses', async () => {
-    const request = new Request('https://external-ie-oa.lancloudtech.com/api/session', {
-      headers: { 'Cf-Access-Jwt-Assertion': 'verified-assertion' },
-    });
-
-    await expect(resolveAccessProviderHint(request, async () => (
-      new Response(JSON.stringify({ idp: { type: 'github' } }), { status: 201 })
-    ))).resolves.toBeNull();
-    await expect(resolveAccessProviderHint(request, async () => (
-      new Response('{invalid-json', { status: 200 })
-    ))).resolves.toBeNull();
-    await expect(resolveAccessProviderHint(request, async () => {
-      throw new Error('network unavailable');
-    })).resolves.toBeNull();
-  });
-});
-
-describe('resolveAuthenticatedIdentity development mode', () => {
-  it('preserves an explicitly supplied development email so corporate-entry tests still receive the same validation boundary', async () => {
-    const env: Env = {
-      DB: {} as D1Database,
-      ENVIRONMENT: 'development',
-      DEV_AUTH: '1',
-    };
-    const entry: AccessEntry = {
-      kind: 'corporate',
-      hostname: 'ie-oa.lancloudtech.com',
-      audience: 'corporate-aud',
-      origin: 'https://ie-oa.lancloudtech.com',
-    };
-
-    await expect(resolveAuthenticatedIdentity(
-      new Request('https://ie-oa.lancloudtech.com/api/session', {
-        headers: { 'x-dev-subject': 'local-subject', 'x-dev-email': 'employee@lancloudtech.com' },
-      }),
-      env,
-      entry,
-    )).resolves.toEqual({
-      issuer: 'dev://local',
-      subject: 'local-subject',
-      email: 'employee@lancloudtech.com',
-    });
-  });
-});
-
 describe('validateIdentityForEntry', () => {
   const corporateEntry: AccessEntry = {
     kind: 'corporate',
     hostname: 'ie-oa.lancloudtech.com',
     audience: 'corporate-aud',
     origin: 'https://ie-oa.lancloudtech.com',
-  };
-  const externalEntry: AccessEntry = {
-    kind: 'external',
-    hostname: 'external-ie-oa.lancloudtech.com',
-    audience: 'external-aud',
-    origin: 'https://external-ie-oa.lancloudtech.com',
   };
   const legacyEntry: AccessEntry = {
     kind: 'legacy',
@@ -147,45 +79,26 @@ describe('validateIdentityForEntry', () => {
   it.each([
     ['企业', corporateEntry],
     ['旧版企业', legacyEntry],
-  ])('%s入口拒绝缺少、非企业及伪造企业域后缀邮箱的已验证身份', (_name, entry) => {
-    for (const email of [undefined, 'person@example.com', 'person@lancloudtech.com.evil']) {
+  ])('%s入口拒绝缺少或形态非法的已验证邮箱', (_name, entry) => {
+    for (const email of [undefined, 'not-an-email', 'person@', '@example.com', 'a@b@c']) {
       expect(() =>
         validateIdentityForEntry(
           { issuer: 'https://team.cloudflareaccess.com', subject: 'verified-subject', ...(email ? { email } : {}) },
           entry,
         ),
-      ).toThrow('corporate Access identity requires a lancloudtech.com email');
+      ).toThrow('corporate Access identity requires a verified email');
     }
   });
 
-  it('在企业入口拒绝伪造企业域后缀邮箱的已验证身份', () => {
-    expect(() =>
-      validateIdentityForEntry(
-        {
-          issuer: 'https://team.cloudflareaccess.com',
-          subject: 'verified-subject',
-          email: 'person@lancloudtech.com.evil',
-        },
-        corporateEntry,
-      ),
-    ).toThrow('corporate Access identity requires a lancloudtech.com email');
+  it('企业入口允许任意域的合法已验证邮箱（能否开户由登录白名单决定）', () => {
+    for (const email of ['person@lancloudtech.com', 'person@example.com']) {
+      const identity = {
+        issuer: 'https://team.cloudflareaccess.com',
+        subject: 'verified-subject',
+        email,
+      };
+      expect(validateIdentityForEntry(identity, corporateEntry)).toBe(identity);
+    }
   });
 
-  it('在企业入口允许精确企业邮箱的已验证身份', () => {
-    const identity = {
-      issuer: 'https://team.cloudflareaccess.com',
-      subject: 'verified-subject',
-      email: 'person@lancloudtech.com',
-    };
-    expect(validateIdentityForEntry(identity, corporateEntry)).toBe(identity);
-  });
-
-  it('在外部入口允许任何已验证邮箱', () => {
-    const identity = {
-      issuer: 'https://team.cloudflareaccess.com',
-      subject: 'verified-subject',
-      email: 'person@example.com',
-    };
-    expect(validateIdentityForEntry(identity, externalEntry)).toBe(identity);
-  });
 });

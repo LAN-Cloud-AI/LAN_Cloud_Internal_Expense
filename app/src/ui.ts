@@ -11,9 +11,9 @@ export const UI_PAGES = [
   'subscriptions',
   'accounts',
   'reimbursements',
+  'finance',
   'rates',
   'people',
-  'imports',
   'profile',
 ] as const;
 
@@ -29,46 +29,47 @@ export interface UiShellOptions {
   principal?: UiPrincipal | null;
   /**
    * 仅允许由本服务端生成的可信 HTML。业务数据请通过 JSON API 返回，避免把
-   * 来自用户或飞书的数据直接拼入 HTML。
+   * 来自用户的数据直接拼入 HTML。
    */
   trustedBody?: string;
 }
 
 export const UI_API_CONTRACT = {
-  identities: '/api/me/identities',
-  beginIdentityLink: '/api/me/identities/link-transactions',
-  resumableIdentityLinks: '/api/me/identities/link-transactions/recovery',
-  confirmIdentityLink: '/api/me/identities/link-transactions/:id/confirm',
-  revokeIdentity: '/api/me/identities/:id',
-  presentExternalIdentity: '/api/external/identity-presentations',
   dashboard: '/api/dashboard',
   subscriptions: '/api/subscriptions',
+  subscriptionOperational: '/api/subscriptions/:id/operational',
   accountAssets: '/api/account-assets',
+  accountOperational: '/api/account-assets/:id',
   accountFieldDefinitions: '/api/account-field-definitions',
   reimbursementCandidates: '/api/reimbursements/candidates',
   reimbursementGenerate: '/api/reimbursements/generate-candidates',
   reimbursementPreview: '/api/reimbursements/preview',
   reimbursementCreate: '/api/reimbursements/create-batches',
+  reimbursementReviewers: '/api/reimbursements/reviewers',
   reimbursementBatches: '/api/reimbursements/batches',
+  reimbursementApprove: '/api/reimbursements/:id/approve',
+  reimbursementMarkPaid: '/api/reimbursements/:id/mark-paid',
   fxQuotes: '/api/fx-quotes',
   fxSync: '/api/exchange-rates/sync',
   users: '/api/users',
+  userOperational: '/api/users/:id',
   roles: '/api/roles',
-  reimbursementAccounts: '/api/reimbursement-accounts',
-  imports: '/api/imports',
-  importPreview: '/api/imports/feishu/preview',
+  payers: '/api/payers',
+  loginWhitelist: '/api/login-whitelist',
+  loginWhitelistDelete: '/api/login-whitelist/:id',
+  financeOverview: '/api/finance/overview',
   auditEvents: '/api/audit-events',
 } as const;
 
 const EMPLOYEE_UI_API_CONTRACT = {
-  identities: UI_API_CONTRACT.identities,
-  beginIdentityLink: UI_API_CONTRACT.beginIdentityLink,
-  resumableIdentityLinks: UI_API_CONTRACT.resumableIdentityLinks,
-  confirmIdentityLink: UI_API_CONTRACT.confirmIdentityLink,
-  revokeIdentity: UI_API_CONTRACT.revokeIdentity,
   dashboard: UI_API_CONTRACT.dashboard,
   subscriptions: UI_API_CONTRACT.subscriptions,
   accountAssets: UI_API_CONTRACT.accountAssets,
+  reimbursementCandidates: UI_API_CONTRACT.reimbursementCandidates,
+  reimbursementBatches: UI_API_CONTRACT.reimbursementBatches,
+  reimbursementGenerate: UI_API_CONTRACT.reimbursementGenerate,
+  reimbursementPreview: UI_API_CONTRACT.reimbursementPreview,
+  reimbursementCreate: UI_API_CONTRACT.reimbursementCreate,
 } as const;
 
 interface NavItem {
@@ -84,9 +85,9 @@ const NAV_ITEMS: NavItem[] = [
   { page: 'subscriptions', href: '/subscriptions', icon: '◫', label: '订阅资产', description: '订阅、条款与付款者' },
   { page: 'accounts', href: '/accounts', icon: '◇', label: '账号资产', description: '账号与可追加字段' },
   { page: 'reimbursements', href: '/reimbursements', icon: '￥', label: '报销中心', description: '候选、合单与付款' },
+  { page: 'finance', href: '/finance', icon: '∑', label: '财务总览', description: '财年支出与图表' },
   { page: 'rates', href: '/rates', icon: '↗', label: '汇率', description: '快照与同步状态' },
   { page: 'people', href: '/people', icon: '◎', label: '人员与权限', description: '用户、角色与付款者' },
-  { page: 'imports', href: '/imports', icon: '⇄', label: '导入与审计', description: '飞书只读导入血缘' },
   { page: 'profile', href: '/profile', icon: '◌', label: '个人设置', description: '登录身份与外部绑定' },
 ];
 
@@ -94,7 +95,7 @@ const PAGE_META: Record<UiPage, { title: string; eyebrow: string; description: s
   dashboard: {
     title: '管理总览',
     eyebrow: '兰芯云朵行政',
-    description: '集中查看订阅资产、待报销费用、汇率与导入异常。',
+    description: '集中查看订阅资产、待报销费用、汇率与支出动态。',
   },
   subscriptions: {
     title: '订阅资产',
@@ -111,6 +112,11 @@ const PAGE_META: Record<UiPage, { title: string; eyebrow: string; description: s
     eyebrow: 'REIMBURSEMENT',
     description: '批量选择候选费用后，系统按付款者自动拆分为报销批次。',
   },
+  finance: {
+    title: '财务总览',
+    eyebrow: 'FINANCE OVERVIEW',
+    description: '本财年、季度、月度支出与报销管线一览。',
+  },
   rates: {
     title: '汇率快照',
     eyebrow: 'FX SNAPSHOTS',
@@ -121,19 +127,21 @@ const PAGE_META: Record<UiPage, { title: string; eyebrow: string; description: s
     eyebrow: 'ACCESS CONTROL',
     description: '以登录主体绑定系统角色；付款者、审核人与管理员权限彼此分离。',
   },
-  imports: {
-    title: '导入与审计',
-    eyebrow: 'READ-ONLY SOURCE',
-    description: '飞书多维表格仅作为只读来源，先预览和确认映射，再受控导入。',
-  },
   profile: {
     title: '个人设置',
     eyebrow: 'IDENTITY SETTINGS',
-    description: '管理企业主身份与已绑定的外部登录方式。',
+    description: '查看企业登录身份与设备会话。',
   },
 };
 
-const EMPLOYEE_PAGES: UiPage[] = ['dashboard', 'subscriptions', 'accounts', 'profile'];
+const EMPLOYEE_PAGES: UiPage[] = ['dashboard', 'subscriptions', 'accounts', 'reimbursements', 'profile'];
+
+const FINANCE_VIEW_ROLES = ['system_admin', 'finance_reviewer', 'auditor'];
+
+function canViewFinance(principal: UiPrincipal | null | undefined): boolean {
+  const roles = principal?.roles ?? [];
+  return roles.some((role) => FINANCE_VIEW_ROLES.includes(role));
+}
 
 function isEmployeeOnly(principal: UiPrincipal | null | undefined): boolean {
   const roles = principal?.roles ?? [];
@@ -188,6 +196,9 @@ function employeeDashboardPage(): string {
   return `<section class="metric-grid employee-metric-grid">
     ${card('我的订阅', '—', '仅统计归属自己的订阅资产')}
     ${card('我的账号资产', '—', '仅统计归属自己的账号资产', 'accent')}
+    ${card('我的待报销', '—', '待合单的候选金额', 'accent')}
+    ${card('进行中报销', '—', '已提交待审核/待付款', 'neutral')}
+    ${card('已报销（累计）', '—', '已付款批次合计', 'neutral')}
   </section>
   <section class="surface">
     ${sectionHeading('我的资产概览', '此页面只显示你被分配的订阅与账号资产。')}
@@ -198,21 +209,28 @@ function employeeDashboardPage(): string {
 function dashboardPage(employeeOnly = false): string {
   if (employeeOnly) return employeeDashboardPage();
   return `<section class="metric-grid">
-    ${card('待处理候选', '—', '按截止日和上次连续已报销日期计算')}
-    ${card('待审报销批次', '—', '一笔提交会按付款者拆分', 'accent')}
-    ${card('汇率异常', '—', '仅显示缺失、过期或同步失败的快照', 'warning')}
-    ${card('导入待确认', '—', '字段漂移或映射错误不会自动写入账本', 'neutral')}
+    ${card('待报销金额', '—', '待合单的候选合计', 'accent')}
+    ${card('待审核批次', '—', '已提交未完成的批次', 'warning')}
+    ${card('汇率异常', '—', '缺失、过期或同步失败的快照', 'warning')}
+    ${card('已付款（累计）', '—', '全部已付款批次合计', 'neutral')}
+  </section>
+  <section class="split-grid">
+    <article class="surface">
+      ${sectionHeading('近 12 个月已付款', '按付款日期聚合；无付款的月份显示为 0。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+      <div class="chart-panel" id="dashboard-monthly-chart" aria-live="polite"><div class="empty-state"><strong>正在载入图表</strong></div></div>
+    </article>
+    <article class="surface">
+      ${sectionHeading('报销管线', '在途与已结算资金的金额分布。')}
+      <div class="chart-panel" id="dashboard-pipeline-chart" aria-live="polite"><div class="empty-state"><strong>正在载入图表</strong></div></div>
+      ${sectionHeading('今日操作', '从候选生成、账期计算到报销付款，关键状态均会留存审计记录。')}
+      <div class="action-grid">
+        <a class="action-card" href="/subscriptions"><span>01</span><strong>维护订阅条款</strong><p>修改价格或付款者时以新版本生效，不改历史账。</p></a>
+        <a class="action-card" href="/reimbursements"><span>02</span><strong>发起报销</strong><p>生成候选费用，勾选后按付款者一键合单。</p></a>
+      </div>
+    </article>
   </section>
   <section class="surface">
-    ${sectionHeading('今日操作', '从只读导入、账期计算到报销付款，关键状态均会留存审计记录。')}
-    <div class="action-grid">
-      <a class="action-card" href="/imports"><span>01</span><strong>预览飞书导入</strong><p>核对字段映射与新增、变更、异常记录。</p></a>
-      <a class="action-card" href="/subscriptions"><span>02</span><strong>维护订阅条款</strong><p>修改价格或付款者时以新版本生效，不改历史账。</p></a>
-      <a class="action-card" href="/reimbursements"><span>03</span><strong>生成报销草稿</strong><p>勾选候选费用，按付款者一键合单。</p></a>
-    </div>
-  </section>
-  <section class="surface">
-    ${sectionHeading('系统动态', '同步、金额锁定、付款确认和权限变更会写入审计日志。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${sectionHeading('系统动态', '同步、金额锁定、付款确认和权限变更会写入审计日志。')}
     ${emptyCollection('dashboard', '概览数据')}
   </section>`;
 }
@@ -224,14 +242,28 @@ function subscriptionsPage(employeeOnly = false): string {
       ${emptyCollection('subscriptions', '订阅')}
     </section>`;
   }
-  return `<section class="split-grid">
+  return `<section>
+    <div class="form-actions"><button class="button primary" type="button" data-action="toggle-create-subscription" aria-expanded="false">＋ 新增订阅</button></div>
+  </section>
+  <section class="split-grid" id="subscription-create-panel" hidden>
     <article class="surface form-surface">
       ${sectionHeading('新增订阅', '新增后请创建一条版本化条款；价格、币种、周期不直接覆盖历史。')}
-      <form data-api="subscriptions" data-success="订阅已创建。下一步请补充条款版本和付款者有效期。">
+      <form data-api="subscriptions" data-success="订阅已创建。">
         <label>订阅名称<input name="name" required maxlength="120" placeholder="例如：团队协作工具" /></label>
-        <label>供应商 ID（可选）<input name="vendor_id" maxlength="80" placeholder="从供应商列表选择后填入" /></label>
-        <label>归属人员 ID（可选）<input name="owner_user_id" maxlength="80" /></label>
-        <label>付款方式（脱敏，可选）<input name="payment_method_masked" maxlength="120" placeholder="例如：Visa **** 1234" /></label>
+        <div class="two-columns">
+          <label>订阅总价（原币）<input name="amount" inputmode="decimal" maxlength="20" placeholder="例如：699.00" /></label>
+          <label>币种<select name="original_currency"><option>CNY</option><option>USD</option><option>EUR</option><option>HKD</option><option>JPY</option><option>GBP</option><option>SGD</option><option>AUD</option><option>CAD</option><option>CHF</option><option>KRW</option></select></label>
+        </div>
+        <div class="two-columns">
+          <label>订阅周期<select name="billing_cycle"><option value="">不设置</option><option value="monthly">月付</option><option value="quarterly">季付</option><option value="yearly">年付</option><option value="one_time">一次性</option></select></label>
+          <label>付款者（在职员工，可选）<select name="payer_user_id" data-options-from="active-users"><option value="">正在载入员工…</option></select></label>
+        </div>
+        <div class="two-columns">
+          <label>订阅开始日期<input name="effective_start" type="date" /></label>
+          <label>订阅截止日期（空=持续续费）<input name="term_effective_end" type="date" /></label>
+        </div>
+        <label>使用者（可选）<select name="owner_user_id" data-options-from="users"><option value="">正在载入人员…</option></select></label>
+        <label>付款方式（可选）<select name="payment_method_masked"><option value="">未设置</option><option>VISA Card</option><option>Master Card</option><option>Paypal</option><option>Apple AppStore</option><option>支付宝</option><option>微信支付</option></select></label>
         <label>备注（可选）<textarea name="notes" rows="2" maxlength="2000" placeholder="不填写密码、卡号或验证码"></textarea></label>
         <label><span>自动续费</span><select name="auto_renew"><option value="false">否</option><option value="true">是</option></select></label>
         <div class="form-actions"><button class="button primary" type="submit">创建订阅</button></div>
@@ -248,8 +280,45 @@ function subscriptionsPage(employeeOnly = false): string {
       </ul>
     </article>
   </section>
+  <section class="surface form-surface" id="subscription-edit-panel" hidden>
+    ${sectionHeading('编辑订阅', '修改归属人员、续费与脱敏信息；价格、币种、周期需以新条款版本变更，不在此编辑。')}
+    <form data-api="subscription-operational" data-success="订阅已更新。">
+      <input type="hidden" name="subscription_id" />
+      <div class="two-columns">
+        <label>订阅名称<input name="name" disabled /></label>
+        <label>使用者（可选）<select name="owner_user_id" data-options-from="users"><option value="">正在载入人员…</option></select></label>
+      </div>
+      <div class="two-columns">
+        <label>付款者（在职员工，可选）<select name="payer_user_id" data-options-from="active-users"><option value="">正在载入员工…</option></select></label>
+        <label>付款方式（可选）<select name="payment_method_masked"><option value="">未设置</option><option>VISA Card</option><option>Master Card</option><option>Paypal</option><option>Apple AppStore</option><option>支付宝</option><option>微信支付</option></select></label>
+      </div>
+      <div class="two-columns">
+        <label>订阅总价（原币）<input name="amount" inputmode="decimal" maxlength="20" placeholder="例如：3500.00" /></label>
+        <label>币种<select name="original_currency"><option>CNY</option><option>USD</option><option>EUR</option><option>HKD</option><option>JPY</option><option>GBP</option><option>SGD</option><option>AUD</option><option>CAD</option><option>CHF</option><option>KRW</option></select></label>
+      </div>
+      <div class="two-columns">
+        <label>订阅周期<select name="billing_cycle"><option value="monthly">月付</option><option value="quarterly">季付</option><option value="yearly">年付</option><option value="one_time">一次性</option></select></label>
+        <label>生效开始日期<input name="effective_start" type="date" /></label>
+      </div>
+      <div class="two-columns">
+        <label>订阅截止日期（空=持续续费）<input name="term_effective_end" type="date" /></label>
+        <span></span>
+      </div>
+      <p class="muted">修改价格、币种或周期会以新条款版本生效并关闭旧条款，不覆盖历史报销；四项需一起填写。</p>
+      <div class="two-columns">
+        <label><span>自动续费</span><select name="auto_renew"><option value="false">否</option><option value="true">是</option></select></label>
+        <span></span>
+      </div>
+      <label>备注（可选）<textarea name="notes" rows="2" maxlength="2000"></textarea></label>
+      <div class="form-actions">
+        <button class="button primary" type="submit">保存修改</button>
+        <button class="button secondary" type="button" data-action="cancel-edit-subscription">取消</button>
+      </div>
+    </form>
+    <div class="action-result" id="subscription-edit-result" aria-live="polite"></div>
+  </section>
   <section class="surface">
-    ${sectionHeading('订阅清单', '可按状态、供应商和付款者筛选；原始导入数据保持可追溯。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${sectionHeading('订阅清单', '可按状态、使用者和付款者查看；原始导入数据保持可追溯。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
     ${emptyCollection('subscriptions', '订阅')}
   </section>`;
 }
@@ -263,12 +332,11 @@ function accountsPage(employeeOnly = false): string {
   }
   return `<section class="split-grid account-grid">
     <article class="surface form-surface">
-      ${sectionHeading('新增账号资产', '只录入必要的标识和脱敏信息；密钥、密码和验证码不进入本系统。')}
+      ${sectionHeading('新增账号资产', '只录入必要的标识信息；密钥、密码和验证码不进入本系统。')}
       <form data-api="account-assets" data-success="账号资产已创建。">
         <label>展示名称<input name="display_name" required maxlength="120" placeholder="例如：设计团队 Figma 账号" /></label>
-        <label>账号标识（脱敏）<input name="account_identifier_masked" required maxlength="160" placeholder="例如：kai***@example.com" /></label>
-        <label>归属人员 ID（可选）<input name="owner_user_id" maxlength="80" /></label>
-        <label>供应商 ID（可选）<input name="vendor_id" maxlength="80" /></label>
+        <label>账号标识<input name="account_identifier_masked" required maxlength="160" placeholder="例如：kaison@example.com" /></label>
+        <label>归属人员（可选）<select name="owner_user_id" data-options-from="users"><option value="">正在载入人员…</option></select></label>
         <label>到期日（可选）<input name="expires_on" type="date" /></label>
         <div class="form-actions"><button class="button primary" type="submit">创建账号资产</button></div>
       </form>
@@ -284,68 +352,100 @@ function accountsPage(employeeOnly = false): string {
       </form>
     </article>
   </section>
+  <section class="surface form-surface" id="account-edit-panel" hidden>
+    ${sectionHeading('编辑账号资产', '修改名称、标识、归属、到期日与状态；密钥、密码不进入本系统。')}
+    <form data-api="account-operational" data-success="账号资产已更新。">
+      <input type="hidden" name="account_id" />
+      <div class="two-columns">
+        <label>展示名称<input name="display_name" required maxlength="120" /></label>
+        <label>账号标识<input name="account_identifier" required maxlength="160" /></label>
+      </div>
+      <div class="two-columns">
+        <label>归属人员（可选）<select name="owner_user_id" data-options-from="users"><option value="">正在载入人员…</option></select></label>
+        <label>状态<select name="status"><option value="active">有效</option><option value="inactive">已停用</option><option value="retired">已退役</option></select></label>
+      </div>
+      <div class="two-columns">
+        <label>到期日（可选）<input name="expires_on" type="date" /></label>
+        <label>凭据库引用（可选）<input name="vault_ref" maxlength="255" /></label>
+      </div>
+      <div class="form-actions">
+        <button class="button primary" type="submit">保存修改</button>
+        <button class="button secondary" type="button" data-action="cancel-edit-account">取消</button>
+      </div>
+    </form>
+    <div class="action-result" id="account-edit-result" aria-live="polite"></div>
+  </section>
   <section class="surface">
-    ${sectionHeading('账号资产清单', '可按人员、供应商、状态和到期日管理。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${sectionHeading('账号资产清单', '可按归属人员、状态和关键字筛选。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    <div class="filter-bar" id="accounts-filter">
+      <select data-accounts-filter="owner" data-options-from="users" data-default-label="全部人员"></select>
+      <select data-accounts-filter="status"><option value="">全部状态</option><option value="active">有效</option><option value="inactive">已停用</option><option value="retired">已退役</option></select>
+      <input data-accounts-filter="q" placeholder="搜索名称或账号标识" maxlength="80" />
+    </div>
     ${emptyCollection('accounts', '账号资产')}
   </section>`;
 }
 
 function reimbursementsPage(): string {
-  return `<section class="notice info"><strong>合单规则：</strong>一次提交中的候选费用按付款者拆分为报销批次；不同币种先锁定汇率换算为 CNY 分后合计。</section>
-  <section class="split-grid">
-    <article class="surface form-surface">
-      ${sectionHeading('批量报销', '在下方勾选候选费用（或粘贴 ID），先预览，再明确创建草稿。')}
-      <label>候选费用 ID（可选，逗号分隔）<textarea id="candidate-ids" rows="5" placeholder="也可直接在下方列表勾选"></textarea></label>
-      <label>报销截止日<input id="reimbursement-cutoff" type="date" /></label>
-      <div class="form-actions">
-        <button class="button secondary" type="button" data-action="generate-candidates">按截止日生成候选</button>
-        <button class="button secondary" type="button" data-action="preview-reimbursement">预览合单</button>
-        <button class="button primary" type="button" data-action="create-reimbursement">创建报销草稿</button>
-      </div>
-      <div class="action-result" id="reimbursement-result" aria-live="polite"></div>
-    </article>
-    <article class="surface explain-card">
-      <span class="eyebrow">防重原则</span>
-      <h2>上次报销日期不是手填总账</h2>
-      <p>系统从已付款明细的连续覆盖期间推导“已报销截至日”。中间有缺口时，未来已付款项目也不会让水位越过缺口。</p>
-      <ul>
-        <li>候选金额、原币和汇率快照生成后即锁定</li>
-        <li>每个候选只能有一条有效报销明细</li>
-        <li>已付款批次不可编辑，修正需要冲销或调整明细</li>
-      </ul>
-    </article>
+  return `<section class="metric-grid">
+    ${card('待报销金额', '—', '待合单的候选金额')}
+    ${card('待审核批次', '—', '已提交未完成的批次', 'accent')}
+    ${card('进行中金额', '—', '审核中与待付款合计', 'neutral')}
+    ${card('已付款金额（累计）', '—', '全部已付款批次', 'neutral')}
   </section>
+  <section class="notice info"><strong>合单规则：</strong>勾选候选费用后一次提交，系统按付款者拆分为报销批次；不同币种先锁定汇率换算为 CNY 分后合计。候选金额、原币和汇率在生成时即锁定。</section>
   <section class="surface">
-    ${sectionHeading('候选费用', '勾选前检查覆盖期间、付款者、汇率状态与附件。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${sectionHeading('候选费用', '系统每日按当天自动入池新账期；勾选要报销的候选，一次提交。')}
+    <div class="form-actions" style="margin-bottom:12px">
+      <button class="button primary" type="button" data-action="create-reimbursement">提交报销</button>
+      <button class="button secondary" type="button" data-action="refresh">刷新</button>
+    </div>
+    <div class="action-result" id="reimbursement-result" aria-live="polite"></div>
     ${emptyCollection('reimbursement-candidates', '报销候选')}
   </section>
+  <div class="modal-overlay" id="reviewer-modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="reviewer-modal-title">
+      <h3 id="reviewer-modal-title">请选择本次报销提交的审批者</h3>
+      <p class="muted">提交后报销流程将流转给该审批者，由其完成审核与确认放款。</p>
+      <label>审批者<select id="reviewer-modal-select" data-options-from="reviewers" required><option value="">正在载入审批者…</option></select></label>
+      <div class="form-actions">
+        <button class="button primary" type="button" data-action="confirm-reviewer">确认提交</button>
+        <button class="button secondary" type="button" data-action="cancel-reviewer">取消</button>
+      </div>
+      <div class="action-result" id="reviewer-modal-result" aria-live="polite"></div>
+    </div>
+  </div>
   <section class="surface">
     ${sectionHeading('报销批次', '付款确认仅开放给具备财务权限的用户。')}
     ${emptyCollection('reimbursement-batches', '报销批次')}
   </section>`;
 }
 
-function ratesPage(): string {
-  return `<section class="split-grid">
-    <article class="surface form-surface">
-      ${sectionHeading('补录汇率快照', '仅用于经过确认的人工汇率。系统按有理数保存，避免浮点误差。')}
-      <form data-api="fx-quotes" data-success="汇率快照已提交。候选费用生成时会锁定此快照。">
-        <div class="two-columns"><label>原币<select name="base_currency"><option>USD</option><option>EUR</option><option>HKD</option><option>JPY</option><option>CNY</option></select></label><label>生效时间<input name="effective_at" type="datetime-local" required /></label></div>
-        <label>分子（CNY 分）<input name="rate_numerator" type="number" min="1" step="1" required placeholder="例如：720" /></label>
-        <label>分母（原币最小单位）<input name="rate_denominator" type="number" min="1" step="1" required value="100" /></label>
-        <label>来源说明<input name="provider" required maxlength="80" placeholder="例如：财务确认 / 汇率服务商" /></label>
-        <div class="form-actions"><button class="button primary" type="submit">保存快照</button><button class="button secondary" type="button" data-action="sync-fx">尝试同步</button></div>
-      </form>
-    </article>
-    <article class="surface explain-card">
-      <span class="eyebrow">CRON</span>
-      <h2>自动同步不等于伪造数据</h2>
-      <p>每日 Cron 只有在配置了受信任的汇率服务后才会抓取数据。没有 provider 或请求失败时，系统记录失败状态，不填充猜测汇率。</p>
-      <p class="muted">汇率定义：1 个原币最小单位 = 分子 / 分母 个 CNY 分。</p>
-    </article>
+function financePage(): string {
+  return `<section class="metric-grid">
+    ${card('本财年已付款', '—', '已付款批次合计', 'accent')}
+    ${card('本季度已付款', '—', '已付款批次合计')}
+    ${card('本月已付款', '—', '已付款批次合计')}
+    ${card('待报销金额', '—', '待合单候选合计', 'warning')}
   </section>
   <section class="surface">
-    ${sectionHeading('汇率快照历史', '含来源、生效时间、状态和锁定时间。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${sectionHeading('近 12 个月已付款金额', '按付款日期聚合；无付款的月份显示为 0。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    <div class="chart-panel" id="finance-monthly-chart" aria-live="polite"><div class="empty-state"><strong>正在载入图表</strong></div></div>
+  </section>
+  <section class="surface">
+    ${sectionHeading('报销管线', '待报销 → 待审核 → 待付款 → 已付款的金额分布。')}
+    <div class="chart-panel" id="finance-pipeline-chart" aria-live="polite"><div class="empty-state"><strong>正在载入图表</strong></div></div>
+  </section>
+  <section class="surface">
+    ${sectionHeading('审计事件', '权限、金额锁定、付款确认和冲销均会写入审计日志。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${emptyCollection('audit-events', '审计事件')}
+  </section>`;
+}
+
+function ratesPage(): string {
+  return `<section class="notice info"><strong>汇率全自动：</strong>生成报销候选时按订阅开始日当天自动抓取并锁定汇率（来源：frankfurter / ECB），每日 Cron 也会同步一次；抓取失败只记录失败状态，不填猜测汇率，无需人工补录。</section>
+  <section class="surface">
+    ${sectionHeading('汇率快照历史', '含来源、生效时间、状态和锁定时间。', '<button class="button secondary" type="button" data-action="sync-fx">立即同步</button>')}
     ${emptyCollection('rates', '汇率快照')}
   </section>`;
 }
@@ -364,41 +464,39 @@ function peoplePage(): string {
   </section>
   <section class="split-grid account-grid">
     <article class="surface form-surface">
-      ${sectionHeading('新增系统用户', '绑定 Cloudflare Access 的稳定 subject；不要把邮箱当作唯一身份。')}
-      <form data-api="users" data-success="系统用户已创建，请再分配角色。">
-        <label>Access subject<input name="external_subject" required maxlength="255" placeholder="来自 Cloudflare Access JWT 的 sub" /></label>
-        <label>显示名称<input name="display_name" required maxlength="80" /></label>
-        <label>邮箱（可选）<input name="email" type="email" maxlength="255" /></label>
-        <div class="form-actions"><button class="button primary" type="submit">创建用户</button></div>
+      ${sectionHeading('登录白名单', '通过 Cloudflare Access 登录且命中白名单的用户自动开通 employee 账号，无需审核。新邮箱/域名还需在 Access 企业应用 policy 中放行才能到达系统。')}
+      <form data-api="login-whitelist" data-success="白名单规则已添加。">
+        <div class="two-columns">
+          <label>类型<select name="kind"><option value="domain">整个域名</option><option value="email">指定邮箱</option></select></label>
+          <label>邮箱或域名<input name="value" required maxlength="255" placeholder="example.com 或 person@example.com" /></label>
+        </div>
+        <div class="form-actions"><button class="button primary" type="submit">添加规则</button></div>
       </form>
+      ${emptyCollection('login-whitelist', '白名单规则')}
     </article>
     <article class="surface form-surface">
       ${sectionHeading('分配角色', '角色替换是明确操作；提交后以 D1 审计记录为准。')}
       <form data-api="user-roles" data-success="用户角色已更新。">
-        <label>用户 ID<input name="user_id" required maxlength="80" /></label>
-        <label>角色代码（逗号分隔）<input name="role_codes" maxlength="200" placeholder="asset_admin,finance_reviewer" /></label>
+        <label>用户<select name="user_id" required data-options-from="users"><option value="">正在载入用户…</option></select></label>
+        <label>角色（可多选）<select name="role_codes" multiple size="6" data-options-from="roles"></select></label>
         <div class="form-actions"><button class="button primary" type="submit">更新角色</button></div>
       </form>
     </article>
   </section>
-  <section class="split-grid">
-    <article class="surface form-surface">
-      ${sectionHeading('报销系统账号', '只保存账号别名、脱敏标识与凭据库引用，不保存第三方平台密码。')}
-      <form data-api="reimbursement-accounts" data-success="报销系统账号已保存。">
-        <label>付款者 ID<input name="payer_id" required maxlength="80" /></label>
-        <label>平台<input name="platform" required maxlength="80" placeholder="例如：企业报销平台" /></label>
-        <label>账号别名<input name="account_alias" required maxlength="120" /></label>
-        <label>账号标识（脱敏，可选）<input name="account_masked" maxlength="160" placeholder="finance***@example.com" /></label>
-        <label>凭据库引用（可选）<input name="vault_ref" maxlength="255" placeholder="仅保存外部 vault 引用" /></label>
-        <label>MFA 状态<select name="mfa_status"><option value="unknown">未知</option><option value="enabled">已启用</option><option value="disabled">未启用</option></select></label>
-        <div class="form-actions"><button class="button primary" type="submit">保存报销账号</button></div>
-      </form>
-    </article>
-    <article class="surface explain-card">
-      <span class="eyebrow">安全边界</span>
-      <h2>权限与凭据分离</h2>
-      <p>Access 负责认证，D1 角色控制业务权限；报销平台实际凭据只保留在企业密码管理器中。本系统仅记录责任人、MFA 状态及可审计的凭据库引用。</p>
-    </article>
+  <section class="surface form-surface" id="user-edit-panel" hidden>
+    ${sectionHeading('编辑用户', '修改姓名与在职状态；停用的用户保留历史归属，但不应再被分配新资产。')}
+    <form data-api="user-edit" data-success="用户已更新。">
+      <input type="hidden" name="user_id" />
+      <div class="two-columns">
+        <label>姓名<input name="display_name" required maxlength="80" /></label>
+        <label>状态<select name="employment_status"><option value="active">在职</option><option value="inactive">停用</option></select></label>
+      </div>
+      <div class="form-actions">
+        <button class="button primary" type="submit">保存修改</button>
+        <button class="button secondary" type="button" data-action="cancel-edit-user">取消</button>
+      </div>
+    </form>
+    <div class="action-result" id="user-edit-result" aria-live="polite"></div>
   </section>
   <section class="surface">
     ${sectionHeading('系统用户', '外部身份使用稳定 subject 绑定，邮箱不能作为唯一安全凭据。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
@@ -406,72 +504,19 @@ function peoplePage(): string {
   </section>`;
 }
 
-function importsPage(): string {
-  return `<section class="notice safety"><strong>只读保障：</strong>此系统不向原飞书多维表格回写记录、字段、权限或视图。导入前先显示差异和映射错误。</section>
-  <section class="split-grid">
-    <article class="surface explain-card">
-      <span class="eyebrow">SOURCE OF TRUTH</span>
-      <h2>飞书 Base → 暂存 → D1</h2>
-      <p>飞书是初始化与同步的数据来源；D1 才是独立系统的业务账本。每条导入记录保留来源表、record ID、版本和哈希，以便审计。</p>
-      <ol>
-        <li>读取字段结构和记录，不写回飞书</li>
-        <li>比较已批准的字段映射与本次结构</li>
-        <li>显示新增、变更、无效值和字段漂移</li>
-        <li>管理员确认后，才执行受控 apply</li>
-      </ol>
-      <div class="form-actions"><button class="button primary" type="button" data-action="preview-import">开始只读预览</button></div>
-      <div class="action-result" id="import-result" aria-live="polite"></div>
-    </article>
-    <article class="surface form-surface">
-      ${sectionHeading('当前来源映射', '首期仅读取“人员账号、邮箱管理”和“资产订阅”两张原表。')}
-      <dl class="mapping-list">
-        <div><dt>人员账号、邮箱管理</dt><dd>人员、邮箱、手机号及各类内部账号 → 人员/账号资产和可追加字段（预览后确认）。</dd></div>
-        <div><dt>资产订阅</dt><dd>订阅项目、订阅者、付款者、周期、币种、金额、开始日和续费信息 → 订阅与条款版本。</dd></div>
-        <div><dt>发票与备注</dt><dd>附件元数据与备注进入审计/附件引用；文件本体可存 R2。</dd></div>
-      </dl>
-    </article>
-  </section>
-  <section class="surface">
-    ${sectionHeading('导入运行记录', '预览、应用、结构漂移和失败均会留下运行记录。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
-    ${emptyCollection('imports', '导入运行记录')}
-  </section>
-  <section class="surface">
-    ${sectionHeading('审计事件', '不展示密码、Token、完整卡号或附件正文。')}
-    ${emptyCollection('audit-events', '审计事件')}
-  </section>`;
-}
-
 function profilePage(): string {
-  return `<section class="surface identity-settings-card">
-    ${sectionHeading('登录身份', '企业主身份用于完成外部登录方式的绑定、确认和撤销。外部身份不会按邮箱自动合并。')}
-    <div class="identity-list" id="identity-list" aria-live="polite">
+  return `<section class="surface">
+    ${sectionHeading('登录身份', '系统仅支持企业邮箱 OTP 登录（Cloudflare Access 一次性验证码）。每台设备完成验证后 30 天内无需重新登录。')}
+    <div class="identity-list">
       <article class="identity-row corporate-identity">
-        <div><strong>企业主身份（不可解绑）</strong><span>已通过企业入口验证；如身份变更，请联系系统管理员进行离线恢复。</span></div>
+        <div><strong>企业主身份</strong><span>通过企业入口 OTP 验证；如身份变更，请联系系统管理员进行离线恢复。</span></div>
         <span class="pill">企业身份</span>
       </article>
-      <div class="empty-state"><strong>正在读取已绑定登录方式</strong><span>只会显示脱敏后的外部身份信息。</span></div>
     </div>
   </section>
   <section class="surface">
-    ${sectionHeading('待恢复的外部绑定', '页面刷新后不会重新显示绑定码。系统只保留你本人未完成绑定的状态、到期时间和脱敏身份；仅已收到外部身份的记录可以确认。')}
-    <div class="identity-link-recovery" id="identity-link-recovery" aria-live="polite">
-      <div class="empty-state"><strong>正在检查未完成的绑定</strong><span>不会显示绑定码、外部登录主体或完整邮箱。</span></div>
-    </div>
-  </section>
-  <section class="surface">
-    ${sectionHeading('绑定外部登录', '生成短时一次性绑定码后，请前往外部入口使用 Cloudflare 或 GitHub 登录。绑定码不会写入链接、日志或审计详情。')}
-    <div class="identity-provider-grid">
-      <article class="identity-provider" data-provider-card="cloudflare">
-        <div><strong>Cloudflare</strong><span data-provider-status="cloudflare">正在检查绑定状态</span></div>
-        <button class="button secondary" type="button" data-action="begin-identity-link" data-provider-label="Cloudflare">绑定 Cloudflare</button>
-      </article>
-      <article class="identity-provider" data-provider-card="github">
-        <div><strong>GitHub</strong><span data-provider-status="github">正在检查绑定状态</span></div>
-        <button class="button secondary" type="button" data-action="begin-identity-link" data-provider-label="GitHub">绑定 GitHub</button>
-      </article>
-    </div>
-    <div class="action-result" id="identity-link-result" aria-live="polite"></div>
-    <div class="identity-link-transaction" id="identity-link-transaction" aria-live="polite"></div>
+    ${sectionHeading('会话与登出', '登出会撤销 Cloudflare Access 全局会话：所有设备都会要求重新验证。')}
+    <div class="form-actions"><a class="button secondary" href="/logout">登出所有设备</a></div>
   </section>`;
 }
 
@@ -483,12 +528,12 @@ function pageContent(page: UiPage, employeeOnly: boolean): string {
       return accountsPage(employeeOnly);
     case 'reimbursements':
       return reimbursementsPage();
+    case 'finance':
+      return financePage();
     case 'rates':
       return ratesPage();
     case 'people':
       return peoplePage();
-    case 'imports':
-      return importsPage();
     case 'profile':
       return profilePage();
     default:
@@ -507,20 +552,25 @@ export function uiPageFromPath(pathname: string): UiPage {
 export function renderAdminUi(options: UiShellOptions = {}): string {
   const employeeOnly = isEmployeeOnly(options.principal);
   const requestedPage = options.page ?? 'dashboard';
-  const page = employeeOnly && !EMPLOYEE_PAGES.includes(requestedPage) ? 'dashboard' : requestedPage;
+  const financeDenied = requestedPage === 'finance' && !canViewFinance(options.principal);
+  const page = (employeeOnly && !EMPLOYEE_PAGES.includes(requestedPage)) || financeDenied ? 'dashboard' : requestedPage;
   const meta = employeeOnly && page === 'dashboard'
     ? { ...PAGE_META.dashboard, description: '查看归属自己的订阅与账号资产。' }
     : PAGE_META[page];
   const userLabel = options.principal?.displayName?.trim() || '未识别用户';
   const roles = options.principal?.roles?.length ? options.principal.roles.join(' · ') : '未分配角色';
-  const navigation = NAV_ITEMS.filter((item) => !employeeOnly || EMPLOYEE_PAGES.includes(item.page)).map((item) => {
+  const navigation = NAV_ITEMS.filter((item) => {
+    if (employeeOnly) return EMPLOYEE_PAGES.includes(item.page);
+    if (item.page === 'finance') return canViewFinance(options.principal);
+    return true;
+  }).map((item) => {
     const selected = item.page === page;
     return `<a href="${item.href}" class="nav-item ${selected ? 'selected' : ''}" ${selected ? 'aria-current="page"' : ''}>
       <span class="nav-icon" aria-hidden="true">${item.icon}</span><span><strong>${item.label}</strong><small>${item.description}</small></span>
     </a>`;
   }).join('');
   const body = options.trustedBody ?? pageContent(page, employeeOnly);
-  const boot = jsonForInlineScript({ page, api: employeeOnly ? EMPLOYEE_UI_API_CONTRACT : UI_API_CONTRACT });
+  const boot = jsonForInlineScript({ page, roles: options.principal?.roles ?? [], api: employeeOnly ? EMPLOYEE_UI_API_CONTRACT : UI_API_CONTRACT });
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -536,12 +586,15 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
     <aside class="sidebar" aria-label="主导航">
       <a class="brand" href="/"><span class="brand-mark">L</span><span><strong>兰芯云朵</strong><small>行政 · 订阅资产</small></span></a>
       <nav>${navigation}</nav>
-      <div class="source-badge"><span class="status-dot"></span><span>飞书来源只读<br /><small>D1 独立账本</small></span></div>
+      <div class="source-badge"><span class="status-dot"></span><span>D1 独立账本<br /><small>数据不出域</small></span></div>
     </aside>
     <main class="main-content">
       <header class="topbar">
         <div><p class="eyebrow">${meta.eyebrow}</p><h1>${meta.title}</h1><p class="page-description">${meta.description}</p></div>
-        <div class="identity" title="角色由 D1 中的授权关系决定"><span class="avatar">${escapeHtml(userLabel.slice(0, 1).toUpperCase())}</span><span><strong>${escapeHtml(userLabel)}</strong><small>${escapeHtml(roles)}</small></span></div>
+        <div class="topbar-side">
+          <div class="identity" title="角色由 D1 中的授权关系决定"><span class="avatar">${escapeHtml(userLabel.slice(0, 1).toUpperCase())}</span><span><strong>${escapeHtml(userLabel)}</strong><small>${escapeHtml(roles)}</small></span></div>
+          <a class="logout-link" href="/logout" title="经 Cloudflare Access 登出所有入口的会话">登出</a>
+        </div>
       </header>
       <div class="page-content">${body}</div>
     </main>
@@ -553,111 +606,12 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
 </html>`;
 }
 
-/**
- * 外部入口不携带业务 shell、身份邮箱或账户存在性信息。未绑定的 Access
- * 身份只能在这里提交由企业主身份生成的一次性绑定码。
- */
-export function renderExternalIdentityUi(): string {
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="light" />
-  <title>外部登录绑定 · 兰芯云朵行政</title>
-  <style>
-    :root { color:#172032; background:#f5f7fb; font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
-    * { box-sizing:border-box; } body { min-height:100vh; margin:0; display:grid; place-items:center; padding:24px; }
-    main { width:min(100%,480px); background:#fff; border:1px solid #e7ebf1; border-radius:16px; box-shadow:0 12px 30px rgba(30,47,80,.08); padding:28px; }
-    .eyebrow { color:#4968ca; font-size:11px; font-weight:800; letter-spacing:.12em; margin:0 0 6px; } h1 { font-size:25px; margin:0 0 10px; letter-spacing:-.03em; } p { color:#697386; font-size:14px; line-height:1.65; margin:0 0 20px; }
-    form { display:grid; gap:10px; } label { color:#404b61; display:grid; font-size:12px; font-weight:700; gap:5px; } input { border:1px solid #ccd4e2; border-radius:8px; font:inherit; padding:10px; width:100%; } input:focus { border-color:#6782e9; box-shadow:0 0 0 3px rgba(77,108,224,.13); outline:0; }
-    button { background:#3559e0; border:0; border-radius:8px; color:#fff; cursor:pointer; font:inherit; font-size:13px; font-weight:750; padding:11px 14px; } button:disabled { cursor:wait; opacity:.7; }
-    #external-binding-result { color:#55627b; font-size:12px; min-height:18px; margin-top:14px; } #external-binding-result.error { color:#bf3a3a; } #external-binding-result.success { color:#1d7a55; }
-  </style>
-</head>
-<body>
-  <main>
-    <p class="eyebrow">EXTERNAL IDENTITY LINK</p>
-    <h1>输入绑定码</h1>
-    <p>请先在企业入口的“个人设置”生成绑定码，再在此处提交。提交后请返回企业入口完成明确确认。</p>
-    <form id="external-binding-form">
-      <label for="external-binding-code">绑定码<input id="external-binding-code" name="code" type="password" autocomplete="one-time-code" required maxlength="64" /></label>
-      <button type="submit">提交绑定码</button>
-    </form>
-    <div id="external-binding-result" aria-live="polite"></div>
-  </main>
-  <script>
-    (() => {
-      const form = document.getElementById('external-binding-form');
-      const result = document.getElementById('external-binding-result');
-      const setResult = (message, kind) => {
-        result.className = kind || '';
-        result.textContent = message;
-      };
-      form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const submit = form.querySelector('button[type="submit"]');
-        const code = String(new FormData(form).get('code') || '').trim();
-        if (!code) return setResult('请输入绑定码。', 'error');
-        submit.disabled = true;
-        try {
-          const response = await fetch('${UI_API_CONTRACT.presentExternalIdentity}', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ code })
-          });
-          if (response.status === 401) {
-            setResult('请先完成外部 Access 登录后重试。', 'error');
-            return;
-          }
-          if (!response.ok) throw new Error('rejected');
-          form.reset();
-          setResult('绑定请求已接收。请返回企业入口完成确认。', 'success');
-        } catch (_) {
-          setResult('绑定请求未被接受。请确认绑定码仍有效后重试。', 'error');
-        } finally {
-          submit.disabled = false;
-        }
-      });
-    })();
-  </script>
-</body>
-</html>`;
-}
-
-/** A data-free fallback when Cloudflare Access did not provide an external identity. */
-export function renderExternalAccessRequiredUi(): string {
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="light" />
-  <title>需要外部 Access 登录 · 兰芯云朵行政</title>
-  <style>
-    :root { color:#172032; background:#f5f7fb; font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
-    * { box-sizing:border-box; } body { min-height:100vh; margin:0; display:grid; place-items:center; padding:24px; }
-    main { width:min(100%,480px); background:#fff; border:1px solid #e7ebf1; border-radius:16px; box-shadow:0 12px 30px rgba(30,47,80,.08); padding:28px; }
-    .eyebrow { color:#4968ca; font-size:11px; font-weight:800; letter-spacing:.12em; margin:0 0 6px; } h1 { font-size:25px; margin:0 0 10px; letter-spacing:-.03em; } p { color:#697386; font-size:14px; line-height:1.65; margin:0; }
-  </style>
-</head>
-<body>
-  <main>
-    <p class="eyebrow">EXTERNAL ACCESS REQUIRED</p>
-    <h1>需要外部 Access 登录</h1>
-    <p>请先完成外部 Access 登录，然后返回此页面继续绑定。</p>
-  </main>
-</body>
-</html>`;
-}
-
 /** A controlled corporate-entry response when Access did not yield a business principal. */
 export function renderCorporateAccessRequiredUi(): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>需要企业登录 · 兰芯云朵行政</title></head>
-<body><main><h1>需要企业邮箱登录</h1><p>请使用 @lancloudtech.com 企业账号通过 Cloudflare Access 登录后再访问系统。</p></main></body>
+<body><main><h1>需要企业邮箱登录</h1><p>请使用 @lancloudtech.com 企业邮箱通过 Cloudflare Access OTP 验证后再访问系统。</p></main></body>
 </html>`;
 }
 
@@ -665,24 +619,32 @@ function styles(): string {
   return `
     :root { --ink:#172032; --muted:#697386; --line:#e7ebf1; --surface:#fff; --canvas:#f5f7fb; --brand:#3559e0; --brand-dark:#263fa5; --accent:#e8efff; --warn:#a86200; --warn-bg:#fff4df; --danger:#bf3a3a; --good:#1d7a55; --shadow:0 12px 30px rgba(30,47,80,.08); font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
     * { box-sizing:border-box; } body { margin:0; color:var(--ink); background:var(--canvas); font-size:14px; line-height:1.5; }
-    .app-shell { min-height:100vh; display:grid; grid-template-columns:250px minmax(0,1fr); }
-    .sidebar { padding:22px 14px; background:#10182d; color:#e8eeff; display:flex; flex-direction:column; gap:25px; }
+    [hidden] { display:none !important; }
+    .app-shell { min-height:100vh; display:grid; grid-template-columns:250px minmax(0,1fr); align-items:start; }
+    .sidebar { padding:22px 14px; background:#10182d; color:#e8eeff; display:flex; flex-direction:column; gap:25px; position:sticky; top:0; height:100vh; overflow-y:auto; scrollbar-width:thin; }
     .brand { color:#fff; text-decoration:none; display:flex; align-items:center; gap:10px; padding:0 8px; } .brand-mark { display:grid; place-items:center; height:33px; width:33px; border-radius:10px; background:linear-gradient(140deg,#7997ff,#4464ed); font-weight:800; } .brand strong,.brand small { display:block; } .brand small { color:#aab8df; font-size:11px; margin-top:1px; }
     nav { display:grid; gap:4px; } .nav-item { color:#aeb9d6; display:flex; align-items:center; gap:11px; padding:10px 10px; border-radius:10px; text-decoration:none; transition:.15s background,.15s color; } .nav-item:hover { background:#1c2949; color:#fff; } .nav-item.selected { background:#314aaf; color:#fff; } .nav-icon { width:20px; text-align:center; font-size:17px; } .nav-item strong,.nav-item small { display:block; } .nav-item strong { font-size:13px; } .nav-item small { font-size:10px; color:inherit; opacity:.68; }
     .source-badge { margin-top:auto; display:flex; gap:8px; padding:12px; border:1px solid #263658; border-radius:11px; background:#14203a; font-size:12px; color:#cfdbff; } .source-badge small { color:#91a3d3; } .status-dot { width:8px; height:8px; border-radius:50%; background:#63d49b; margin-top:5px; flex:none; }
     .main-content { min-width:0; padding:0 36px 40px; } .topbar { padding:32px 0 25px; display:flex; align-items:flex-start; justify-content:space-between; gap:20px; } .eyebrow { margin:0 0 4px; color:#4968ca; font-size:11px; font-weight:800; letter-spacing:.12em; } h1,h2,p { margin-top:0; } h1 { font-size:28px; line-height:1.2; letter-spacing:-.04em; margin-bottom:7px; } h2 { font-size:16px; margin-bottom:4px; letter-spacing:-.015em; } .page-description,.section-heading p { color:var(--muted); margin-bottom:0; }
     .identity { min-width:170px; display:flex; align-items:center; justify-content:flex-end; gap:9px; padding:8px 0; } .avatar { display:grid; place-items:center; width:32px; height:32px; border-radius:50%; background:#dce5ff; color:#2f4db6; font-weight:800; } .identity strong,.identity small { display:block; } .identity small { color:var(--muted); max-width:180px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:11px; }
-    .page-content { display:grid; gap:18px; max-width:1400px; } .surface { background:var(--surface); border:1px solid var(--line); border-radius:15px; box-shadow:var(--shadow); padding:20px; } .metric-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; } .metric { min-height:118px; padding:16px; background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); display:flex; flex-direction:column; } .metric p { color:var(--muted); margin:0 0 12px; font-size:12px; } .metric strong { font-size:28px; letter-spacing:-.04em; } .metric small { margin-top:auto; color:var(--muted); font-size:11px; } .metric.accent { border-color:#c7d4ff; background:#fbfcff; } .metric.warning { border-color:#ffe2ac; background:#fffdfa; } .metric.neutral { background:#fafbfc; }
+    .topbar-side { display:flex; align-items:center; gap:14px; } .logout-link { flex:none; color:var(--muted); font-size:12px; text-decoration:none; border:1px solid var(--line); border-radius:8px; background:#fff; padding:7px 11px; } .logout-link:hover { color:var(--ink); border-color:#c3cbda; }
+    .page-content { display:grid; gap:18px; max-width:1400px; min-width:0; } .surface { background:var(--surface); border:1px solid var(--line); border-radius:15px; box-shadow:var(--shadow); padding:20px; min-width:0; max-width:100%; } .split-grid > *, .account-grid > *, .metric-grid > * { min-width:0; } .metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; } .metric { min-height:118px; padding:16px; background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); display:flex; flex-direction:column; } .metric p { color:var(--muted); margin:0 0 12px; font-size:12px; } .metric strong { font-size:26px; letter-spacing:-.03em; overflow-wrap:anywhere; } .metric small { margin-top:auto; color:var(--muted); font-size:11px; } .metric.accent { border-color:#c7d4ff; background:#fbfcff; } .metric.warning { border-color:#ffe2ac; background:#fffdfa; } .metric.neutral { background:#fafbfc; }
     .section-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:16px; } .section-heading h2 { margin:0 0 4px; } .section-heading p { font-size:12px; } .action-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; } .action-card { min-height:135px; padding:16px; border:1px solid var(--line); border-radius:12px; color:inherit; text-decoration:none; background:#fbfcff; } .action-card:hover { border-color:#aebffc; transform:translateY(-1px); } .action-card span { color:#657dcf; font-size:11px; font-weight:800; } .action-card strong { display:block; margin:12px 0 4px; } .action-card p { color:var(--muted); font-size:12px; margin-bottom:0; }
     .split-grid { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(280px,.75fr); gap:18px; } .account-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .form-surface form { display:grid; gap:12px; } label { display:grid; gap:5px; color:#404b61; font-size:12px; font-weight:700; } input,select,textarea { border:1px solid #ccd4e2; border-radius:8px; background:#fff; color:var(--ink); font:inherit; font-weight:400; padding:9px 10px; width:100%; outline:none; } input:focus,select:focus,textarea:focus { border-color:#6782e9; box-shadow:0 0 0 3px rgba(77,108,224,.13); } textarea { resize:vertical; } .two-columns { display:grid; grid-template-columns:1fr 1fr; gap:10px; } .form-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:3px; }
+    .filter-bar { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin:0 0 12px; }
     .button { border:1px solid transparent; border-radius:8px; cursor:pointer; font:inherit; font-size:12px; font-weight:750; line-height:1; padding:10px 13px; transition:.15s transform,.15s background; } .button:hover { transform:translateY(-1px); } .button.primary { color:#fff; background:var(--brand); } .button.primary:hover { background:var(--brand-dark); } .button.secondary { color:#34446b; border-color:#cdd5e4; background:#fff; } .button.secondary:hover { background:#f3f5fa; }
     .explain-card { background:linear-gradient(150deg,#fbfcff,#f2f5ff); } .explain-card p,.explain-card li { color:#57637a; } .explain-card ul,.explain-card ol { margin:14px 0 0; padding-left:18px; display:grid; gap:7px; font-size:12px; } .muted { color:var(--muted)!important; font-size:12px; } .notice { border-radius:11px; padding:13px 15px; font-size:13px; } .notice.info { color:#2d4eae; border:1px solid #cbd7ff; background:#edf2ff; } .notice.safety { color:#246343; border:1px solid #b9e5cc; background:#effaf4; }
-    .data-panel { border:1px dashed #d3dae6; border-radius:10px; overflow:auto; min-height:102px; } .empty-state { padding:26px 18px; display:grid; justify-items:start; gap:4px; color:#66738a; } .empty-state strong { color:#34415a; } .empty-state span { font-size:12px; } table { width:100%; border-collapse:collapse; min-width:580px; } th,td { padding:10px 12px; text-align:left; vertical-align:top; border-bottom:1px solid #edf0f5; font-size:12px; } th { color:#697386; background:#f9fafc; font-weight:750; white-space:nowrap; } td { color:#28354d; word-break:break-word; } tr:last-child td { border-bottom:0; } .pill { display:inline-flex; border-radius:99px; padding:2px 7px; background:#edf1fb; color:#4960aa; font-size:11px; white-space:nowrap; }
+    .data-panel { border:1px dashed #d3dae6; border-radius:10px; overflow:auto; min-height:102px; max-width:100%; } .empty-state { padding:26px 18px; display:grid; justify-items:start; gap:4px; color:#66738a; } .empty-state strong { color:#34415a; } .empty-state span { font-size:12px; } table { width:100%; border-collapse:collapse; min-width:580px; } th,td { padding:10px 12px; text-align:left; vertical-align:top; border-bottom:1px solid #edf0f5; font-size:12px; white-space:nowrap; } th { color:#697386; background:#f9fafc; font-weight:750; } td { color:#28354d; } td.cell-wrap { white-space:normal; min-width:200px; max-width:360px; word-break:break-word; } tr:last-child td { border-bottom:0; } .pill { display:inline-flex; border-radius:99px; padding:2px 7px; background:#edf1fb; color:#4960aa; font-size:11px; white-space:nowrap; }
+    table.sticky-actions th:first-child, table.sticky-actions td:first-child { position:sticky; left:0; z-index:1; background:#fff; box-shadow:8px 0 10px -8px rgba(30,47,80,.22); } table.sticky-actions th:first-child { background:#f9fafc; }
+    table.sticky-actions th:last-child, table.sticky-actions td:last-child { position:sticky; right:0; z-index:1; background:#fff; box-shadow:-8px 0 10px -8px rgba(30,47,80,.28); } table.sticky-actions th:last-child { background:#f9fafc; }
     .role-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; } .role-grid article { padding:13px; border:1px solid var(--line); border-radius:10px; background:#fcfcfe; } .role-grid strong,.role-grid span { display:block; } .role-grid span { color:var(--muted); font-size:11px; margin-top:4px; } .mapping-list { display:grid; gap:12px; margin:0; } .mapping-list div { padding-bottom:12px; border-bottom:1px solid var(--line); } .mapping-list div:last-child { padding-bottom:0; border:0; } .mapping-list dt { font-weight:750; } .mapping-list dd { margin:3px 0 0; color:var(--muted); font-size:12px; } .action-result { min-height:18px; color:#55627b; font-size:12px; } .action-result.error { color:var(--danger); } .action-result.success { color:var(--good); }
-    .identity-list,.identity-link-recovery { display:grid; gap:9px; } .identity-row,.identity-provider { align-items:center; background:#fbfcff; border:1px solid var(--line); border-radius:10px; display:flex; gap:14px; justify-content:space-between; padding:13px; } .identity-row > div,.identity-provider > div { min-width:0; } .identity-row strong,.identity-row span,.identity-provider strong,.identity-provider span { display:block; } .identity-row > div > span,.identity-provider > div > span { color:var(--muted); font-size:12px; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .corporate-identity { border-color:#c7d4ff; background:#f7f9ff; } .identity-provider-grid { display:grid; gap:10px; grid-template-columns:repeat(2,minmax(0,1fr)); } .identity-link-transaction { display:grid; gap:8px; margin-top:14px; } .identity-link-transaction p { color:var(--muted); font-size:12px; margin:0; overflow-wrap:anywhere; }
+    .identity-list { display:grid; gap:9px; } .identity-row { align-items:center; background:#fbfcff; border:1px solid var(--line); border-radius:10px; display:flex; gap:14px; justify-content:space-between; padding:13px; } .identity-row > div { min-width:0; } .identity-row strong,.identity-row span { display:block; } .identity-row > div > span { color:var(--muted); font-size:12px; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .corporate-identity { border-color:#c7d4ff; background:#f7f9ff; }
     .toast { position:fixed; right:20px; bottom:20px; max-width:360px; transform:translateY(120px); opacity:0; transition:.2s; background:#19233b; color:#fff; padding:11px 13px; border-radius:9px; box-shadow:var(--shadow); font-size:12px; pointer-events:none; } .toast.show { transform:translateY(0); opacity:1; }
-    @media (max-width:980px) { .app-shell { grid-template-columns:1fr; } .sidebar { position:sticky; top:0; z-index:3; padding:10px 16px; display:flex; flex-direction:row; align-items:center; overflow:auto; } .brand { min-width:max-content; } .sidebar nav { display:flex; gap:3px; } .nav-item { min-width:max-content; padding:7px 9px; } .nav-item small { display:none; } .source-badge { display:none; } .main-content { padding:0 20px 28px; } .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-    @media (max-width:640px) { .main-content { padding:0 14px 24px; } .topbar { padding:22px 0 18px; } .topbar .identity { display:none; } h1 { font-size:24px; } .metric-grid,.split-grid,.account-grid,.action-grid,.role-grid,.two-columns,.identity-provider-grid { grid-template-columns:1fr; } .surface { padding:16px; } .section-heading { display:grid; } .identity-row,.identity-provider { align-items:flex-start; flex-direction:column; } }
+    .modal-overlay { position:fixed; inset:0; z-index:10; background:rgba(23,32,50,.45); display:flex; align-items:center; justify-content:center; padding:20px; } .modal-card { width:min(100%,420px); background:#fff; border-radius:14px; box-shadow:0 18px 50px rgba(23,32,50,.28); padding:22px; display:grid; gap:12px; } .modal-card h3 { margin:0; font-size:17px; letter-spacing:-.02em; }
+    .chart-panel { min-height:120px; } .chart-axis { fill:#697386; font-size:10px; } .chart-value { fill:#28354d; font-size:10px; font-weight:700; } .pipeline-legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:10px; font-size:12px; color:#55627b; } .pipeline-legend-item { display:inline-flex; align-items:center; gap:6px; } .pipeline-dot { display:inline-block; width:10px; height:10px; border-radius:3px; }
+    @media (max-width:980px) { .app-shell { grid-template-columns:1fr; } .sidebar { position:sticky; top:0; z-index:3; padding:10px 16px; display:flex; flex-direction:row; align-items:center; overflow:auto; height:auto; } .brand { min-width:max-content; } .sidebar nav { display:flex; gap:3px; } .nav-item { min-width:max-content; padding:7px 9px; } .nav-item small { display:none; } .source-badge { display:none; } .main-content { padding:0 20px 28px; } .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .split-grid, .account-grid { grid-template-columns:1fr; } }
+    @media (max-width:640px) { .filter-bar { grid-template-columns:1fr; } }
+    @media (max-width:640px) { .main-content { padding:0 14px 24px; } .topbar { padding:22px 0 18px; } .topbar .identity { display:none; } h1 { font-size:24px; } .metric-grid,.split-grid,.account-grid,.action-grid,.role-grid,.two-columns { grid-template-columns:1fr; } .surface { padding:16px; } .section-heading { display:grid; } .identity-row { align-items:flex-start; flex-direction:column; } }
   `;
 }
 
@@ -699,7 +661,7 @@ function clientScript(): string {
         'reimbursement-batches': api.reimbursementBatches,
         rates: api.fxQuotes,
         people: api.users,
-        imports: api.imports,
+        'login-whitelist': api.loginWhitelist,
         'audit-events': api.auditEvents
       };
       const escapeHtml = (value) => String(value == null ? '' : value).replace(/[&<>'"]/g, (character) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]));
@@ -733,34 +695,213 @@ function clientScript(): string {
         for (const key of ['items', 'data', 'records', 'batches', 'candidates', 'results']) if (Array.isArray(payload[key])) return payload[key];
         return [];
       };
-      const renderCollection = (panel, payload) => {
-        const rows = recordsFrom(payload);
+      const optionSources = {
+        users: { url: () => api.users, value: 'id', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
+        'active-users': { url: () => api.users, value: 'id', filter: (row) => row.employment_status === 'active', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
+        reviewers: { url: () => api.reimbursementReviewers, value: 'id', label: (row) => String(row.display_name || '') },
+        roles: { url: () => api.roles, value: 'code', label: (row) => String(row.display_name || '') + ' · ' + String(row.code || '') }
+      };
+      const loadOptionSelects = async () => {
+        const selects = Array.from(document.querySelectorAll('select[data-options-from]'));
+        await Promise.all(selects.map(async (select) => {
+          const source = optionSources[select.dataset.optionsFrom];
+          if (!source || !source.url()) return;
+          try {
+            const payload = await jsonRequest(source.url());
+            const rows = recordsFrom(payload).filter(source.filter || (() => true));
+            const options = [];
+            if (!select.multiple) options.push('<option value="">' + (select.dataset.defaultLabel || (select.required ? '请选择…' : '不关联（可选）')) + '</option>');
+            rows.forEach((row) => {
+              const value = row && row[source.value];
+              if (typeof value !== 'string' || !value) return;
+              options.push('<option value="' + escapeHtml(value) + '">' + escapeHtml(source.label(row)) + '</option>');
+            });
+            select.innerHTML = options.join('') || '<option value="">暂无可选项</option>';
+          } catch (_) {
+            select.innerHTML = '<option value="">列表载入失败</option>';
+          }
+        }));
+      };
+      const FIELD_LABELS = {
+        name: '名称', display_name: '显示名称', status: '状态', owner_name: '归属人员', payer_name: '付款者',
+        auto_renew: '是否自动续费', payment_method_masked: '付款方式', notes: '备注',
+        term_effective_start: '订阅开始日期', term_effective_end: '订阅截止日期', billing_cycle: '订阅周期',
+        settlement_mode: '结算方式', billing_anchor_date: '账单锚定日', original_currency: '订阅币种', amount_minor: '订阅总价',
+        account_identifier_masked: '账号标识', expires_on: '到期日', created_at: '创建时间',
+        email: '邮箱', employment_status: '在职状态', roles: '角色',
+        base_currency: '原币', quote_currency: '目标币', rate_numerator: '汇率分子', rate_denominator: '汇率分母',
+        effective_at: '生效日期', fetched_at: '抓取时间', provider: '来源', provider_reference: '来源参考', locked_at: '锁定时间',
+        coverage_start: '覆盖开始', coverage_end: '覆盖结束', original_amount_minor: '原币金额', cny_amount_fen: 'CNY 金额',
+        action: '动作', entity_type: '对象类型', entity_id: '对象 ID', actor_name: '操作人', detail_json: '详情',
+        mode: '模式', summary_json: '摘要', started_at: '开始时间', finished_at: '结束时间',
+        connection_name: '来源连接', schema_status: '结构状态', kind: '类型', error_code: '错误码',
+        platform: '平台', account_alias: '账号别名', account_masked: '账号标识', mfa_status: 'MFA 状态',
+        active_from: '生效开始', active_until: '生效结束', subscription_name: '订阅项目', payer_display_name: '付款者',
+        rate_locked: '锁定汇率', rate_display: '汇率', next_step: '下一步', paid_at: '付款日期', item_count: '明细数', cutoff_date: '报销截止日',
+        actor_name: '提交人', reviewer_name: '审核人'
+      };
+      const HIDDEN_COLUMNS = new Set([
+        'id', 'owner_user_id', 'payer_id', 'active_term_version_id', 'active_payer_assignment_id',
+        'subscription_id', 'fx_quote_id', 'subscription_term_version_id', 'payer_assignment_id',
+        'source_record_id', 'external_subject', 'vault_ref', 'raw_response_hash',
+        'rate_numerator', 'rate_denominator', 'base_currency', 'submission_id'
+      ]);
+      // 订阅清单按多维表格 1:1 的列顺序展示；其余集合按动态键补充。
+      const COLLECTION_COLUMN_ORDER = {
+        subscriptions: ['name', 'term_effective_start', 'term_effective_end', 'billing_cycle', 'original_currency', 'amount_minor', 'payer_name', 'owner_name', 'auto_renew', 'payment_method_masked', 'notes', 'status', 'settlement_mode', 'billing_anchor_date'],
+        accounts: ['display_name', 'account_identifier_masked', 'owner_name', 'status', 'expires_on', 'created_at'],
+        rates: ['rate_display', 'effective_at', 'provider', 'status', 'fetched_at', 'locked_at', 'provider_reference'],
+        'reimbursement-batches': ['payer_name', 'reviewer_name', 'actor_name', 'coverage_start', 'coverage_end', 'total_cny_fen', 'status', 'next_step', 'paid_at', 'created_at', 'item_count']
+      };
+      const COLLECTION_LABELS = {
+        'reimbursement-batches': { name: '报销人' },
+        subscriptions: { name: '订阅项目名称', owner_name: '使用者' }
+      };
+      const FX_ZERO_DECIMAL = ['JPY', 'KRW', 'VND'];
+      const CURRENCY_ZH = { USD: '美元', EUR: '欧元', HKD: '港币', JPY: '日元', KRW: '韩元', GBP: '英镑', SGD: '新加坡元', CNY: '人民币' };
+      // 汇率统一按“人民币-原币: 1:X”展示；存储仍是最小单位整数有理数，显示不涉及浮点金额。
+      const decorateRateRow = (row) => {
+        const digits = FX_ZERO_DECIMAL.includes(row.base_currency) ? 0 : 2;
+        const perWholeUnit = (row.rate_numerator / row.rate_denominator) * (100 / 10 ** digits);
+        const rounded = Math.round(perWholeUnit * 10000) / 10000;
+        return Object.assign({}, row, { rate_display: '人民币-' + (CURRENCY_ZH[row.base_currency] || row.base_currency) + ': 1:' + rounded });
+      };
+      const NEXT_STEP_LABELS = {
+        submitted: '等待财务审核',
+        reviewing: '财务审核中',
+        approved: '等待财务确认付款',
+        paid: '已完成',
+        returned: '已退回',
+        void: '已作废'
+      };
+      const decorateRow = (collection, row) => {
+        if (collection === 'rates') return decorateRateRow(row);
+        if (collection === 'reimbursement-batches') {
+          return Object.assign({}, row, { next_step: NEXT_STEP_LABELS[row.status] || '—' });
+        }
+        return row;
+      };
+      const CYCLE_LABELS = { monthly: '月付', quarterly: '季付', yearly: '年付', one_time: '一次性' };
+      const SETTLEMENT_LABELS = { actual_bill: '实际账单', accrual: '按天摊销' };
+      const STATUS_LABELS = {
+        subscriptions: { active: '有效', paused: '暂停', ended: '已结束' },
+        'reimbursement-candidates': { pending: '待报销', batched: '已入批', paid: '已付款', reversed: '已冲销' },
+        'reimbursement-batches': { submitted: '待审核', reviewing: '审核中', approved: '待付款', paid: '已付款', reversed: '已冲销' },
+        accounts: { active: '有效', inactive: '已停用', retired: '已退役' },
+        rates: { verified: '已验证', stale: '已过期', manual: '人工补录', failed: '失败' },
+        people: { active: '在职', inactive: '停用' }
+      };
+      const canReviewFinance = (config.roles || []).some((role) => ['system_admin', 'finance_reviewer'].includes(role));
+      const canManageUsers = (config.roles || []).includes('system_admin');
+      const canManageAccounts = (config.roles || []).some((role) => ['system_admin', 'asset_admin'].includes(role));
+      const labelFor = (collection, key) => (COLLECTION_LABELS[collection] && COLLECTION_LABELS[collection][key]) || FIELD_LABELS[key] || key;
+      const orderedKeys = (collection, keys) => {
+        const order = COLLECTION_COLUMN_ORDER[collection];
+        if (!order) return keys;
+        const preferred = order.filter((key) => keys.includes(key));
+        const extras = keys.filter((key) => !order.includes(key));
+        return preferred.concat(extras);
+      };
+      const formatCell = (collection, key, value) => {
+        if (key === 'term_effective_end' && (value == null || value === '')) return '持续';
+        if (value == null || value === '') return '—';
+        if (key === 'status' || key === 'employment_status') {
+          const map = STATUS_LABELS[collection];
+          if (map && map[value]) return map[value];
+        }
+        if (key === 'amount_minor' || key === 'original_amount_minor') return (Number(value) / 100).toFixed(2);
+        if (key === 'cny_amount_fen' || key === 'total_cny_fen') return '¥' + (Number(value) / 100).toFixed(2);
+        if (key === 'auto_renew') return Number(value) ? '是' : '否';
+        if (key === 'billing_cycle') return CYCLE_LABELS[value] || value;
+        if (key === 'settlement_mode') return SETTLEMENT_LABELS[value] || value;
+        if (key === 'roles') return Array.isArray(value) ? value.join('、') : String(value);
+        if (typeof value === 'object') return JSON.stringify(value);
+        return String(value);
+      };
+      const collectionRows = {};
+      const accountsFilterState = { owner: '', status: '', q: '' };
+      const WRAPPABLE_COLUMNS = new Set(['notes', 'detail_json', 'summary_json', 'account_identifier_masked']);
+      const cellTag = (key, content) => '<td' + (WRAPPABLE_COLUMNS.has(key) ? ' class="cell-wrap"' : '') + '>' + content + '</td>';
+      const renderRowsInto = (panel, rows, totalCount) => {
         const label = panel.dataset.label || '数据';
         if (!rows.length) {
-          panel.innerHTML = '<div class="empty-state"><strong>暂无' + escapeHtml(label) + '</strong><span>数据导入、权限配置或接口启用后会显示在这里。</span></div>';
+          const hint = totalCount ? '当前筛选没有匹配记录。' : '数据导入、权限配置或接口启用后会显示在这里。';
+          panel.innerHTML = '<div class="empty-state"><strong>暂无' + escapeHtml(label) + '</strong><span>' + hint + '</span></div>';
           return;
         }
-        const keys = Array.from(new Set(rows.flatMap((row) => Object.keys(row || {})))).slice(0, 8);
+        const displayRows = rows.map((row) => decorateRow(panel.dataset.collection, row));
+        const keys = orderedKeys(panel.dataset.collection, Array.from(new Set(displayRows.flatMap((row) => Object.keys(row || {})))).filter((key) => !HIDDEN_COLUMNS.has(key)));
         if (!keys.length) return;
         const selectableCandidates = panel.dataset.collection === 'reimbursement-candidates';
-        const head = (selectableCandidates ? '<th>选择</th>' : '') + keys.map((key) => '<th>' + escapeHtml(key) + '</th>').join('');
-        const body = rows.slice(0, 100).map((row) => '<tr>' + keys.map((key) => {
-          const value = row && row[key];
-          const display = typeof value === 'object' ? JSON.stringify(value) : value;
-          return '<td>' + escapeHtml(display == null ? '—' : display) + '</td>';
-        }).join('') + '</tr>').join('');
-        const candidateBody = selectableCandidates ? rows.slice(0, 100).map((row) => {
+        const editableSubscriptions = panel.dataset.collection === 'subscriptions' && Boolean(document.getElementById('subscription-edit-panel'));
+        const financeBatchActions = panel.dataset.collection === 'reimbursement-batches' && canReviewFinance;
+        const editablePeople = panel.dataset.collection === 'people' && canManageUsers && Boolean(document.getElementById('user-edit-panel'));
+        const editableWhitelist = panel.dataset.collection === 'login-whitelist' && canManageUsers;
+        const editableAccounts = panel.dataset.collection === 'accounts' && canManageAccounts && Boolean(document.getElementById('account-edit-panel'));
+        const hasActions = editableSubscriptions || financeBatchActions || editablePeople || editableWhitelist || editableAccounts;
+        const batchActionCell = (row) => {
+          if (!row || typeof row.id !== 'string') return '<td>—</td>';
+          if (row.status === 'submitted' || row.status === 'reviewing') {
+            return '<td><button class="button secondary" type="button" data-action="approve-batch" data-batch-id="' + escapeHtml(row.id) + '">审核通过</button></td>';
+          }
+          if (row.status === 'approved') {
+            return '<td><button class="button primary" type="button" data-action="mark-paid-batch" data-batch-id="' + escapeHtml(row.id) + '">确认付款</button></td>';
+          }
+          return '<td>—</td>';
+        };
+        const actionCell = (row) => {
+          if (!row || typeof row.id !== 'string') return '<td>—</td>';
+          if (editableSubscriptions) {
+            return '<td><button class="button secondary" type="button" data-action="edit-subscription" data-subscription-id="' + escapeHtml(row.id) + '">编辑</button></td>';
+          }
+          if (financeBatchActions) return batchActionCell(row);
+          if (editablePeople) {
+            return '<td><button class="button secondary" type="button" data-action="edit-user" data-user-id="' + escapeHtml(row.id) + '">编辑</button></td>';
+          }
+          if (editableWhitelist) {
+            return '<td><button class="button secondary" type="button" data-action="delete-whitelist-rule" data-rule-id="' + escapeHtml(row.id) + '">删除</button></td>';
+          }
+          if (editableAccounts) {
+            return '<td><button class="button secondary" type="button" data-action="edit-account" data-account-id="' + escapeHtml(row.id) + '">编辑</button></td>';
+          }
+          return '';
+        };
+        const head = (selectableCandidates ? '<th><input type="checkbox" data-action="toggle-all-candidates" aria-label="全选候选费用" title="全选/全不选" /></th>' : '') + keys.map((key) => '<th>' + escapeHtml(labelFor(panel.dataset.collection, key)) + '</th>').join('') + (hasActions ? '<th>操作</th>' : '');
+        const body = displayRows.slice(0, 100).map((row, rowIndex) => '<tr>' + keys.map((key) => {
+          return cellTag(key, escapeHtml(formatCell(panel.dataset.collection, key, row && row[key])));
+        }).join('') + (hasActions ? actionCell(rows[rowIndex]) : '') + '</tr>').join('');
+        const candidateBody = selectableCandidates ? displayRows.slice(0, 100).map((row) => {
           const id = row && row.id;
           const selectable = row && row.status === 'pending' && typeof id === 'string';
           const checkbox = selectable ? '<td><input type="checkbox" data-candidate-id="' + escapeHtml(id) + '" aria-label="选择候选费用" /></td>' : '<td>—</td>';
           return '<tr>' + checkbox + keys.map((key) => {
-            const value = row && row[key];
-            const display = typeof value === 'object' ? JSON.stringify(value) : value;
-            return '<td>' + escapeHtml(display == null ? '—' : display) + '</td>';
+            return cellTag(key, escapeHtml(formatCell(panel.dataset.collection, key, row && row[key])));
           }).join('') + '</tr>';
         }).join('') : body;
-        panel.innerHTML = '<table><thead><tr>' + head + '</tr></thead><tbody>' + candidateBody + '</tbody></table>';
+        panel.innerHTML = '<table' + (hasActions ? ' class="sticky-actions"' : '') + '><thead><tr>' + head + '</tr></thead><tbody>' + candidateBody + '</tbody></table>';
       };
+      const applyAccountsFilter = () => {
+        const panel = document.querySelector('[data-collection="accounts"]');
+        if (!panel) return;
+        const all = collectionRows.accounts || [];
+        const rows = all.filter((row) => {
+          if (accountsFilterState.owner && row && row.owner_user_id !== accountsFilterState.owner) return false;
+          if (accountsFilterState.status && row && row.status !== accountsFilterState.status) return false;
+          if (accountsFilterState.q) {
+            const hay = (String((row && row.display_name) || '') + ' ' + String((row && row.account_identifier_masked) || '')).toLowerCase();
+            if (!hay.includes(accountsFilterState.q.toLowerCase())) return false;
+          }
+          return true;
+        });
+        renderRowsInto(panel, rows, all.length);
+      };
+      const renderCollection = (panel, payload) => {
+        const rows = recordsFrom(payload);
+        collectionRows[panel.dataset.collection] = rows;
+        if (panel.dataset.collection === 'accounts') return applyAccountsFilter();
+        renderRowsInto(panel, rows, rows.length);
+      };
+      const fen = (value) => '¥' + (Number(value || 0) / 100).toFixed(2);
       const updateDashboardMetrics = (payload) => {
         if (!payload || typeof payload !== 'object') return;
         const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
@@ -768,10 +909,23 @@ function clientScript(): string {
           '待处理候选': data.pending_candidates,
           '待审报销批次': data.review_batches,
           '汇率异常': data.fx_exceptions,
-          '导入待确认': data.import_exceptions,
           '我的订阅': data.owned_subscriptions,
           '我的账号资产': data.owned_account_assets,
         };
+        if (data.my_pending_candidates) {
+          lookup['我的待报销'] = fen(data.my_pending_candidates.total_cny_fen);
+          lookup['进行中报销'] = fen(data.my_inflight_batches && data.my_inflight_batches.total_cny_fen);
+          lookup['已报销（累计）'] = fen(data.my_paid_batches && data.my_paid_batches.total_cny_fen);
+          lookup['待报销金额'] = fen(data.my_pending_candidates.total_cny_fen);
+          lookup['待审核批次'] = String((data.my_inflight_batches && data.my_inflight_batches.count) ?? 0);
+          lookup['进行中金额'] = fen(data.my_inflight_batches && data.my_inflight_batches.total_cny_fen);
+          lookup['已付款金额（累计）'] = fen(data.my_paid_batches && data.my_paid_batches.total_cny_fen);
+        } else {
+          lookup['待报销金额'] = fen(data.pending_candidates && data.pending_candidates.total_cny_fen);
+          lookup['待审核批次'] = String((data.review_batches && data.review_batches.count) ?? 0);
+          lookup['进行中金额'] = fen(data.inflight_batches && data.inflight_batches.total_cny_fen);
+          lookup['已付款金额（累计）'] = fen(data.paid_summary && data.paid_summary.total_cny_fen);
+        }
         Object.entries(lookup).forEach(([label, value]) => {
           const el = document.querySelector('[data-metric="' + label + '"]');
           const display = value && typeof value === 'object' && 'count' in value ? value.count : value;
@@ -784,9 +938,29 @@ function clientScript(): string {
         try {
           const payload = await jsonRequest(url);
           renderCollection(panel, payload);
-          if (panel.dataset.collection === 'dashboard') updateDashboardMetrics(payload);
+          if (panel.dataset.collection === 'dashboard') {
+            updateDashboardMetrics(payload);
+            renderDashboardCharts(payload);
+          }
         } catch (error) {
           panel.innerHTML = '<div class="empty-state"><strong>暂时无法读取数据</strong><span>' + escapeHtml(error.message || '请检查登录、权限或 API 配置。') + '</span></div>';
+        }
+      };
+      const renderDashboardCharts = (payload) => {
+        const monthlyPanel = document.getElementById('dashboard-monthly-chart');
+        const pipelinePanel = document.getElementById('dashboard-pipeline-chart');
+        if (!monthlyPanel && !pipelinePanel) return;
+        const data = payload && payload.data && typeof payload.data === 'object' ? payload.data : {};
+        const monthly = Array.isArray(data.monthly_paid) ? data.monthly_paid : [];
+        if (monthlyPanel) {
+          renderBarChart(monthlyPanel, monthly.map((point) => ({ label: String(point.month || '').slice(2), value: point.total_cny_fen || 0 })));
+        }
+        if (pipelinePanel) {
+          renderPipelineChart(pipelinePanel, [
+            { label: '待报销', value: (data.pending_candidates && data.pending_candidates.total_cny_fen) || 0, color: '#a86200' },
+            { label: '进行中', value: (data.inflight_batches && data.inflight_batches.total_cny_fen) || 0, color: '#4968ca' },
+            { label: '已付款（累计）', value: (data.paid_summary && data.paid_summary.total_cny_fen) || 0, color: '#1d7a55' },
+          ]);
         }
       };
       const refreshAll = () => document.querySelectorAll('[data-collection]').forEach((panel) => { void refreshCollection(panel); });
@@ -796,288 +970,15 @@ function clientScript(): string {
         el.className = 'action-result ' + (kind || '');
         el.textContent = message;
       };
-      const setIdentityResult = (message, kind) => setResult('identity-link-result', message, kind);
-      const identityText = (value) => typeof value === 'string' ? value : '';
-      const providerLabel = (provider) => provider === 'cloudflare'
-        ? 'Cloudflare'
-        : provider === 'github'
-          ? 'GitHub'
-          : '外部登录';
-      const identityElement = (tag, text, className) => {
-        const element = document.createElement(tag);
-        if (className) element.className = className;
-        element.textContent = text;
-        return element;
-      };
-      const renderIdentities = (identities) => {
-        const panel = document.getElementById('identity-list');
-        if (!panel) return;
-        const safeIdentities = Array.isArray(identities) ? identities : [];
-        const corporate = document.createElement('article');
-        corporate.className = 'identity-row corporate-identity';
-        const corporateText = document.createElement('div');
-        corporateText.append(
-          identityElement('strong', '企业主身份（不可解绑）'),
-          identityElement('span', '已通过企业入口验证；如身份变更，请联系系统管理员进行离线恢复。'),
-        );
-        corporate.append(corporateText, identityElement('span', '企业身份', 'pill'));
-        panel.replaceChildren(corporate);
-
-        const linked = safeIdentities.filter((identity) => identity && identity.identity_kind === 'linked_external');
-        const activeByProvider = new Map();
-        linked.forEach((identity) => {
-          if (identity.status === 'active' && (identity.provider_hint === 'cloudflare' || identity.provider_hint === 'github')) {
-            activeByProvider.set(identity.provider_hint, identity);
-          }
-        });
-        const hasUnclassifiedActiveIdentity = linked.some((identity) => identity.status === 'active'
-          && identity.provider_hint !== 'cloudflare' && identity.provider_hint !== 'github');
-        document.querySelectorAll('[data-provider-status]').forEach((status) => {
-          const identity = activeByProvider.get(status.dataset.providerStatus);
-          const masked = identityText(identity && identity.email_masked);
-          status.textContent = identity
-            ? ('已绑定' + (masked ? ' · ' + masked : ''))
-            : hasUnclassifiedActiveIdentity
-              ? '已绑定（登录方式未识别）'
-              : '尚未绑定';
-        });
-
-        if (!linked.length) {
-          panel.append(identityElement('p', '尚未绑定外部登录方式。', 'muted'));
-          return;
-        }
-        linked.forEach((identity) => {
-          const row = document.createElement('article');
-          row.className = 'identity-row';
-          const details = document.createElement('div');
-          const label = providerLabel(identity.provider_hint);
-          const masked = identityText(identity.email_masked);
-          const status = identity.status === 'active' ? '已绑定' : '已停用';
-          details.append(
-            identityElement('strong', label + ' 外部登录'),
-            identityElement('span', (masked ? masked + ' · ' : '') + status),
-          );
-          row.append(details);
-          if (identity.status === 'active' && typeof identity.id === 'string') {
-            const revoke = document.createElement('button');
-            revoke.type = 'button';
-            revoke.className = 'button secondary';
-            revoke.textContent = '撤销绑定';
-            revoke.addEventListener('click', async () => {
-              revoke.disabled = true;
-              try {
-                await jsonRequest(api.revokeIdentity.replace(':id', encodeURIComponent(identity.id)), {
-                  method: 'DELETE',
-                  headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                  body: '{}',
-                });
-                setIdentityResult('外部登录方式已撤销。', 'success');
-                await loadIdentities();
-              } catch (_) {
-                setIdentityResult('暂时无法撤销该外部登录方式。', 'error');
-              } finally {
-                revoke.disabled = false;
-              }
-            });
-            row.append(revoke);
-          } else {
-            row.append(identityElement('span', '已停用', 'pill'));
-          }
-          panel.append(row);
-        });
-      };
-      const loadIdentities = async () => {
-        try {
-          const result = await jsonRequest(api.identities);
-          const data = result && typeof result.data === 'object' ? result.data : {};
-          renderIdentities(data.identities);
-        } catch (_) {
-          setIdentityResult('暂时无法读取登录身份，请稍后重试。', 'error');
-        }
-      };
-      const safeResumableLinkTransactions = (transactions) => Array.isArray(transactions)
-        ? transactions.filter((transaction) => transaction
-          && typeof transaction === 'object'
-          && typeof transaction.id === 'string'
-          && (transaction.status === 'pending' || transaction.status === 'candidate_presented'))
-        : [];
-      const renderResumableLinkTransactions = (transactions) => {
-        const panel = document.getElementById('identity-link-recovery');
-        const safeTransactions = safeResumableLinkTransactions(transactions);
-        if (!panel) return safeTransactions;
-        panel.replaceChildren();
-        if (!safeTransactions.length) {
-          panel.append(identityElement('p', '没有可恢复的外部绑定。', 'muted'));
-          return safeTransactions;
-        }
-        safeTransactions.forEach((transaction) => {
-          const transactionId = identityText(transaction.id);
-          const status = identityText(transaction.status);
-          const provider = providerLabel(identityText(transaction.provider_hint));
-          const emailMasked = status === 'candidate_presented'
-            ? identityText(transaction.email_masked)
-            : '';
-          const expiresAt = identityText(transaction.expires_at);
-          const row = document.createElement('article');
-          row.className = 'identity-row';
-          const details = document.createElement('div');
-          if (status === 'candidate_presented') {
-            details.append(
-              identityElement('strong', provider + ' 登录身份已提交'),
-              identityElement(
-                'span',
-                (emailMasked ? emailMasked + ' · ' : '') + '请核对后确认绑定' + (expiresAt ? '，到期：' + expiresAt : '。'),
-              ),
-            );
-            const confirm = document.createElement('button');
-            confirm.type = 'button';
-            confirm.className = 'button primary';
-            confirm.textContent = '继续确认绑定';
-            confirm.addEventListener('click', async () => {
-              confirm.disabled = true;
-              try {
-                await confirmRecoveredLinkTransaction(transactionId);
-              } catch (_) {
-                setIdentityResult('暂时无法确认该绑定，请刷新页面后重试。', 'error');
-                confirm.disabled = false;
-              }
-            });
-            row.append(details, confirm);
-          } else {
-            details.append(
-              identityElement('strong', '等待外部身份提交'),
-              identityElement(
-                'span',
-                '请使用仍在安全位置保存的一次性绑定码完成外部入口操作；刷新后不会重新显示绑定码。'
-                  + (expiresAt ? ' 到期：' + expiresAt : ''),
-              ),
-            );
-            row.append(details, identityElement('span', '等待提交', 'pill'));
-          }
-          panel.append(row);
-        });
-        return safeTransactions;
-      };
-      const loadResumableLinkTransactions = async () => {
-        const panel = document.getElementById('identity-link-recovery');
-        if (!panel) return [];
-        try {
-          const result = await jsonRequest(api.resumableIdentityLinks);
-          const data = result && typeof result.data === 'object' ? result.data : {};
-          return renderResumableLinkTransactions(data.transactions);
-        } catch (_) {
-          panel.replaceChildren(identityElement('p', '暂时无法读取未完成的绑定，请稍后刷新页面。', 'muted'));
-          return [];
-        }
-      };
-      const confirmRecoveredLinkTransaction = async (transactionId) => {
-        await jsonRequest(api.confirmIdentityLink.replace(':id', encodeURIComponent(transactionId)), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: '{}',
-        });
-        document.getElementById('identity-link-transaction')?.replaceChildren();
-        await Promise.all([loadIdentities(), loadResumableLinkTransactions()]);
-        setIdentityResult('外部登录方式已确认。', 'success');
-      };
-      const showLinkTransaction = (transaction, label) => {
-        const transactionId = identityText(transaction && transaction.id);
-        const code = identityText(transaction && transaction.code);
-        const externalUrl = identityText(transaction && transaction.external_url);
-        if (!transactionId || !code || !externalUrl) throw new Error('invalid_link_transaction');
-        const panel = document.getElementById('identity-link-transaction');
-        if (!panel) return;
-        panel.replaceChildren();
-        const instruction = identityElement('p', label + ' 绑定码已生成。请在十分钟内点击“复制绑定码”，再前往外部入口登录并提交。');
-        const actions = document.createElement('div');
-        actions.className = 'form-actions';
-        const copy = document.createElement('button');
-        copy.type = 'button';
-        copy.className = 'button primary';
-        copy.textContent = '复制绑定码';
-        copy.addEventListener('click', async () => {
-          copy.disabled = true;
-          try {
-            await navigator.clipboard.writeText(code);
-            setIdentityResult('绑定码已复制到剪贴板。请打开外部入口并提交。', 'success');
-          } catch (_) {
-            setIdentityResult('暂时无法复制绑定码。请允许浏览器访问剪贴板后重试。', 'error');
-          } finally {
-            copy.disabled = false;
-          }
-        });
-        const externalLink = document.createElement('a');
-        externalLink.href = externalUrl;
-        externalLink.className = 'button secondary';
-        externalLink.textContent = '打开外部入口';
-        externalLink.target = '_blank';
-        externalLink.rel = 'noopener noreferrer';
-        const refresh = document.createElement('button');
-        refresh.type = 'button';
-        refresh.className = 'button secondary';
-        refresh.textContent = '刷新身份状态';
-        const confirm = document.createElement('button');
-        confirm.type = 'button';
-        confirm.className = 'button primary';
-        confirm.textContent = '确认绑定';
-        confirm.disabled = true;
-        refresh.addEventListener('click', async () => {
-          refresh.disabled = true;
-          try {
-            const transactions = await loadResumableLinkTransactions();
-            const resumed = transactions.find((candidate) => candidate.id === transactionId);
-            if (resumed && resumed.status === 'candidate_presented') {
-              confirm.disabled = false;
-              setIdentityResult('已收到外部登录身份。请核对后明确确认绑定。', 'success');
-            } else {
-              confirm.disabled = true;
-              setIdentityResult('尚未收到外部登录身份。请完成外部入口操作后再刷新。', 'error');
-            }
-          } finally {
-            refresh.disabled = false;
-          }
-        });
-        confirm.addEventListener('click', async () => {
-          confirm.disabled = true;
-          try {
-            await confirmRecoveredLinkTransaction(transactionId);
-          } catch (_) {
-            setIdentityResult('暂时无法确认该绑定，请刷新身份状态后重试。', 'error');
-            confirm.disabled = false;
-          }
-        });
-        actions.append(copy, externalLink, refresh, confirm);
-        panel.append(instruction, actions);
-      };
-      document.querySelectorAll('[data-action="begin-identity-link"]').forEach((button) => {
-        button.addEventListener('click', async () => {
-          button.disabled = true;
-          try {
-            const result = await jsonRequest(api.beginIdentityLink, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-              body: '{}',
-            });
-            const transaction = result && typeof result.data === 'object' ? result.data : null;
-            showLinkTransaction(transaction, identityText(button.dataset.providerLabel) || '外部登录');
-            await loadResumableLinkTransactions();
-            setIdentityResult('请完成外部入口操作后刷新身份状态，再明确确认绑定。', 'success');
-          } catch (_) {
-            setIdentityResult('暂时无法生成绑定码，请稍后重试。', 'error');
-          } finally {
-            button.disabled = false;
-          }
-        });
-      });
-      const candidateIds = () => Array.from(new Set([
-        ...(document.getElementById('candidate-ids')?.value || '').split(',').map((value) => value.trim()).filter(Boolean),
-        ...Array.from(document.querySelectorAll('[data-candidate-id]:checked')).map((input) => input.dataset.candidateId).filter(Boolean)
-      ]));
-      const reimbursementPayload = () => ({ candidate_ids: candidateIds(), cutoff_date: document.getElementById('reimbursement-cutoff')?.value || undefined });
+      const candidateIds = () => Array.from(new Set(
+        Array.from(document.querySelectorAll('[data-candidate-id]:checked')).map((input) => input.dataset.candidateId).filter(Boolean),
+      ));
+      const reimbursementPayload = () => ({ candidate_ids: candidateIds() });
       document.querySelectorAll('form[data-api]').forEach((form) => form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const endpointKey = form.dataset.api;
-        const values = Object.fromEntries(new FormData(form).entries());
+        const formData = new FormData(form);
+        const values = Object.fromEntries(formData.entries());
         Object.keys(values).forEach((key) => { if (values[key] === '') delete values[key]; });
         try {
           let url = endpointKey === 'subscriptions' ? api.subscriptions
@@ -1085,19 +986,95 @@ function clientScript(): string {
             : endpointKey === 'account-field-definitions' ? api.accountFieldDefinitions
             : endpointKey === 'fx-quotes' ? api.fxQuotes
             : endpointKey === 'users' ? api.users
-            : endpointKey === 'reimbursement-accounts' ? api.reimbursementAccounts
+            : endpointKey === 'login-whitelist' ? api.loginWhitelist
             : null;
           let method = 'POST';
+          let payload = values;
+          if (endpointKey === 'user-edit') {
+            const editUserId = values.user_id;
+            if (!editUserId) throw new Error('缺少用户 ID。');
+            url = api.userOperational.replace(':id', encodeURIComponent(editUserId));
+            method = 'PUT';
+            payload = { display_name: values.display_name, employment_status: values.employment_status };
+          }
+          if (endpointKey === 'account-operational') {
+            const accountId = values.account_id;
+            if (!accountId) throw new Error('缺少账号资产 ID。');
+            url = api.accountOperational.replace(':id', encodeURIComponent(accountId));
+            method = 'PUT';
+            payload = {
+              display_name: values.display_name,
+              account_identifier: values.account_identifier,
+              owner_user_id: values.owner_user_id || null,
+              status: values.status,
+              expires_on: values.expires_on || null,
+              vault_ref: values.vault_ref || null,
+            };
+          }
           if (endpointKey === 'user-roles') {
             const userId = values.user_id;
-            if (!userId) throw new Error('请填写用户 ID。');
+            if (!userId) throw new Error('请选择用户。');
             url = api.users + '/' + encodeURIComponent(userId) + '/roles';
             method = 'PUT';
-            values.role_codes = String(values.role_codes || '').split(',').map((role) => role.trim()).filter(Boolean);
+            values.role_codes = formData.getAll('role_codes').map(String).filter(Boolean);
             delete values.user_id;
           }
+          if (endpointKey === 'subscriptions') {
+            const amountText = typeof values.amount === 'string' ? values.amount.trim() : '';
+            const termParts = [amountText, values.original_currency, values.billing_cycle, values.effective_start].map((value) => (typeof value === 'string' ? value.trim() : ''));
+            const filled = termParts.filter((value) => value !== '').length;
+            if (values.payer_id && filled === 0) throw new Error('关联付款者需要同时填写订阅总价、币种、周期和开始日期。');
+            if (filled > 0) {
+              if (filled < 4) throw new Error('订阅总价、币种、周期和开始日期需一起填写。');
+              const major = Number(amountText);
+              if (!Number.isFinite(major) || major < 0) throw new Error('订阅总价必须是非负数字。');
+              values.term = {
+                effective_start: values.effective_start,
+                effective_end: values.term_effective_end || null,
+                billing_cycle: values.billing_cycle,
+                original_currency: String(values.original_currency).toUpperCase(),
+                amount_minor: Math.round(major * 100),
+              };
+            }
+            delete values.amount;
+            delete values.original_currency;
+            delete values.billing_cycle;
+            delete values.effective_start;
+            delete values.term_effective_end;
+            payload = values;
+          }
+          if (endpointKey === 'subscription-operational') {
+            const subscriptionId = values.subscription_id;
+            if (!subscriptionId) throw new Error('缺少订阅 ID。');
+            url = api.subscriptionOperational.replace(':id', encodeURIComponent(subscriptionId));
+            method = 'PUT';
+            const amountText = typeof values.amount === 'string' ? values.amount.trim() : '';
+            const termFields = [amountText, values.original_currency, values.billing_cycle, values.effective_start].map((value) => (typeof value === 'string' ? value.trim() : ''));
+            const filled = termFields.filter((value) => value !== '').length;
+            let term;
+            if (filled > 0) {
+              if (filled < 4) throw new Error('价格、币种、周期和生效日期需一起填写。');
+              const major = Number(amountText);
+              if (!Number.isFinite(major) || major < 0) throw new Error('订阅总价必须是非负数字。');
+              term = {
+                effective_start: values.effective_start,
+                billing_cycle: values.billing_cycle,
+                original_currency: String(values.original_currency).toUpperCase(),
+                amount_minor: Math.round(major * 100),
+              };
+            }
+            payload = {
+              auto_renew: values.auto_renew === 'true',
+              owner_user_id: values.owner_user_id || null,
+              payer_user_id: values.payer_user_id || null,
+              payment_method_masked: values.payment_method_masked || null,
+              notes: values.notes || null,
+              term_effective_end: values.term_effective_end || null,
+              ...(term ? { term } : {}),
+            };
+          }
           if (!url) return toast('该表单尚未绑定 API。');
-          await jsonRequest(url, { method, headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(values) });
+          await jsonRequest(url, { method, headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(payload) });
           form.reset();
           toast(form.dataset.success || '已保存。');
           refreshAll();
@@ -1107,29 +1084,175 @@ function clientScript(): string {
         const button = event.target.closest('[data-action]');
         if (!button) return;
         const action = button.dataset.action;
-        if (action === 'refresh') return refreshAll();
-        if (action === 'generate-candidates') {
-          const cutoffDate = document.getElementById('reimbursement-cutoff')?.value;
-          if (!cutoffDate) return setResult('reimbursement-result', '请先选择报销截止日。', 'error');
-          try {
-            const result = await jsonRequest(api.reimbursementGenerate, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cutoff_date: cutoffDate }) });
-            setResult('reimbursement-result', '候选生成完成：新增 ' + String(result.generated || 0) + ' 条，跳过既有 ' + String(result.skipped_existing || 0) + ' 条。', 'success');
-            refreshAll();
-          } catch (error) { setResult('reimbursement-result', error.message || '生成候选失败。', 'error'); }
+        if (action === 'refresh') {
+          if (config.page === 'reimbursements' && api.reimbursementGenerate) {
+            try { await jsonRequest(api.reimbursementGenerate, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (_) { /* 生成失败不阻断刷新，Cron 每日兜底 */ }
+          }
+          if (config.page === 'finance') void loadFinanceOverview();
+          return refreshAll();
+        }
+        if (action === 'toggle-create-subscription') {
+          const panel = document.getElementById('subscription-create-panel');
+          if (!panel) return;
+          panel.hidden = !panel.hidden;
+          button.setAttribute('aria-expanded', panel.hidden ? 'false' : 'true');
           return;
         }
-        if (action === 'preview-reimbursement' || action === 'create-reimbursement') {
-          const payload = reimbursementPayload();
-          if (!payload.candidate_ids.length) return setResult('reimbursement-result', '请至少输入一个候选费用 ID。', 'error');
-          const url = action === 'preview-reimbursement' ? api.reimbursementPreview : api.reimbursementCreate;
+        if (action === 'edit-subscription') {
+          const panel = document.getElementById('subscription-edit-panel');
+          const rows = collectionRows.subscriptions || [];
+          const row = rows.find((candidate) => candidate && candidate.id === button.dataset.subscriptionId);
+          if (!panel || !row) return;
+          const form = panel.querySelector('form');
+          form.elements.subscription_id.value = row.id;
+          form.elements.name.value = row.name || '';
+          form.elements.owner_user_id.value = row.owner_user_id || '';
+          form.elements.payer_user_id.value = row.payer_owner_user_id || '';
+          form.elements.amount.value = typeof row.amount_minor === 'number' ? (row.amount_minor / 100).toFixed(2) : '';
+          form.elements.original_currency.value = row.original_currency || '';
+          form.elements.billing_cycle.value = row.billing_cycle || 'monthly';
+          form.elements.effective_start.value = row.term_effective_start || '';
+          form.elements.term_effective_end.value = row.term_effective_end || '';
+          form.elements.auto_renew.value = row.auto_renew ? 'true' : 'false';
+          form.elements.payment_method_masked.value = row.payment_method_masked || '';
+          form.elements.notes.value = row.notes || '';
+          panel.hidden = false;
+          panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          return;
+        }
+        if (action === 'cancel-edit-subscription') {
+          const panel = document.getElementById('subscription-edit-panel');
+          if (panel) {
+            panel.hidden = true;
+            const form = panel.querySelector('form');
+            if (form) form.reset();
+          }
+          return;
+        }
+        if (action === 'edit-user') {
+          const panel = document.getElementById('user-edit-panel');
+          const rows = collectionRows.people || [];
+          const row = rows.find((candidate) => candidate && candidate.id === button.dataset.userId);
+          if (!panel || !row) return;
+          const form = panel.querySelector('form');
+          form.elements.user_id.value = row.id;
+          form.elements.display_name.value = row.display_name || '';
+          form.elements.employment_status.value = row.employment_status || 'active';
+          panel.hidden = false;
+          panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          return;
+        }
+        if (action === 'cancel-edit-user') {
+          const panel = document.getElementById('user-edit-panel');
+          if (panel) {
+            panel.hidden = true;
+            const form = panel.querySelector('form');
+            if (form) form.reset();
+          }
+          return;
+        }
+        if (action === 'edit-account') {
+          const panel = document.getElementById('account-edit-panel');
+          const rows = collectionRows.accounts || [];
+          const row = rows.find((candidate) => candidate && candidate.id === button.dataset.accountId);
+          if (!panel || !row) return;
+          const form = panel.querySelector('form');
+          form.elements.account_id.value = row.id;
+          form.elements.display_name.value = row.display_name || '';
+          form.elements.account_identifier.value = row.account_identifier_masked || '';
+          form.elements.owner_user_id.value = row.owner_user_id || '';
+          form.elements.status.value = row.status || 'active';
+          form.elements.expires_on.value = row.expires_on || '';
+          form.elements.vault_ref.value = row.vault_ref || '';
+          panel.hidden = false;
+          panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          return;
+        }
+        if (action === 'cancel-edit-account') {
+          const panel = document.getElementById('account-edit-panel');
+          if (panel) {
+            panel.hidden = true;
+            const form = panel.querySelector('form');
+            if (form) form.reset();
+          }
+          return;
+        }
+        if (action === 'delete-whitelist-rule') {
+          const ruleId = button.dataset.ruleId;
+          if (!ruleId) return;
+          if (!window.confirm('确定删除该白名单规则？删除后命中该规则的用户将无法自动开户。')) return;
+          button.disabled = true;
           try {
-            const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
-            if (action === 'create-reimbursement') headers['Idempotency-Key'] = crypto.randomUUID();
-            const result = await jsonRequest(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+            await jsonRequest(api.loginWhitelistDelete.replace(':id', encodeURIComponent(ruleId)), { method: 'DELETE' });
+            toast('白名单规则已删除。');
+            refreshAll();
+          } catch (error) {
+            toast(error.message || '删除失败。');
+            button.disabled = false;
+          }
+          return;
+        }
+        if (action === 'toggle-all-candidates') {
+          const panel = button.closest('[data-collection]');
+          if (!panel) return;
+          panel.querySelectorAll('input[data-candidate-id]').forEach((checkbox) => { checkbox.checked = button.checked; });
+          return;
+        }
+        if (action === 'approve-batch' || action === 'mark-paid-batch') {
+          const batchId = button.dataset.batchId;
+          if (!batchId) return;
+          let url = api.reimbursementApprove.replace(':id', encodeURIComponent(batchId));
+          let body = '{}';
+          if (action === 'mark-paid-batch') {
+            const today = new Date().toISOString().slice(0, 10);
+            const paidAt = window.prompt('确认付款日期（YYYY-MM-DD）', today);
+            if (paidAt === null) return;
+            if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(paidAt.trim())) return toast('付款日期必须是 YYYY-MM-DD。');
+            url = api.reimbursementMarkPaid.replace(':id', encodeURIComponent(batchId));
+            body = JSON.stringify({ paid_at: paidAt.trim() });
+          }
+          button.disabled = true;
+          try {
+            await jsonRequest(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+            toast(action === 'approve-batch' ? '批次已审核通过。' : '批次已确认付款。');
+            refreshAll();
+          } catch (error) {
+            toast(error.message || '操作失败。');
+            button.disabled = false;
+          }
+          return;
+        }
+        if (action === 'create-reimbursement') {
+          const payload = reimbursementPayload();
+          if (!payload.candidate_ids.length) return setResult('reimbursement-result', '请先勾选要报销的候选费用。', 'error');
+          const modal = document.getElementById('reviewer-modal');
+          if (modal) modal.hidden = false;
+          return;
+        }
+        if (action === 'cancel-reviewer') {
+          const modal = document.getElementById('reviewer-modal');
+          if (modal) modal.hidden = true;
+          return;
+        }
+        if (action === 'confirm-reviewer') {
+          const payload = reimbursementPayload();
+          if (!payload.candidate_ids.length) {
+            const modal = document.getElementById('reviewer-modal');
+            if (modal) modal.hidden = true;
+            return setResult('reimbursement-result', '候选已失效，请重新勾选。', 'error');
+          }
+          const reviewerId = document.getElementById('reviewer-modal-select')?.value;
+          if (!reviewerId) return setResult('reviewer-modal-result', '请选择审批者。', 'error');
+          payload.reviewer_user_id = reviewerId;
+          const modal = document.getElementById('reviewer-modal');
+          if (modal) modal.hidden = true;
+          try {
+            const headers = { 'Content-Type': 'application/json', Accept: 'application/json', 'Idempotency-Key': crypto.randomUUID() };
+            const result = await jsonRequest(api.reimbursementCreate, { method: 'POST', headers, body: JSON.stringify(payload) });
             const data = result.data && typeof result.data === 'object' ? result.data : result;
             const batches = data.batches || data.items || [];
-            setResult('reimbursement-result', (action === 'preview-reimbursement' ? '预览完成' : '草稿已创建') + '：' + (Array.isArray(batches) ? batches.length : 0) + ' 个付款者批次。', 'success');
-            if (action === 'create-reimbursement') refreshAll();
+            setResult('reimbursement-result', '报销已提交：' + (Array.isArray(batches) ? batches.length : 0) + ' 个付款者批次，等待审批者审核。', 'success');
+            refreshAll();
           } catch (error) { setResult('reimbursement-result', error.message || '操作失败。', 'error'); }
           return;
         }
@@ -1138,20 +1261,143 @@ function clientScript(): string {
           catch (error) { toast(error.message || '汇率同步不可用。'); }
           return;
         }
+        if (action === 'sync-fx') {
+          try { await jsonRequest(api.fxSync, { method: 'POST' }); toast('汇率同步任务已提交。'); refreshAll(); }
+          catch (error) { toast(error.message || '汇率同步不可用。'); }
+          return;
+        }
         if (action === 'preview-import') {
+          importSchemaVersionId = null;
+          const approveButton = document.querySelector('[data-action="approve-import-mapping"]');
+          const applyButton = document.querySelector('[data-action="apply-import"]');
+          if (approveButton) approveButton.disabled = true;
+          if (applyButton) applyButton.disabled = true;
           try {
             const result = await jsonRequest(api.importPreview, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
             const data = result.data && typeof result.data === 'object' ? result.data : result;
-            const summary = data.summary || data.message || (Array.isArray(data.tables) ? ('只读预览完成：' + data.tables.length + ' 张表，待确认字段 ID 映射。') : '只读预览完成，请检查导入运行记录。');
+            if (typeof data.schema_version_id === 'string') importSchemaVersionId = data.schema_version_id;
+            if (importSchemaVersionId && data.requires_mapping_approval && approveButton) approveButton.disabled = false;
+            if (importSchemaVersionId && !data.requires_mapping_approval && applyButton) applyButton.disabled = false;
+            const summary = data.summary || data.message || (Array.isArray(data.tables) ? ('只读预览完成：' + data.tables.length + ' 张表，' + (data.requires_mapping_approval ? '请审批字段 ID 映射。' : '映射已审批，可执行正式导入。')) : '只读预览完成，请检查导入运行记录。');
             setResult('import-result', typeof summary === 'string' ? summary : JSON.stringify(summary), 'success');
             refreshAll();
           } catch (error) { setResult('import-result', error.message || '预览失败。', 'error'); }
+          return;
+        }
+        if (action === 'approve-import-mapping') {
+          if (!importSchemaVersionId) return setResult('import-result', '请先完成只读预览。', 'error');
+          try {
+            await jsonRequest(api.importApprove.replace(':id', encodeURIComponent(importSchemaVersionId)), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+            setResult('import-result', '字段映射已审批，可以执行正式导入。', 'success');
+            const applyButton = document.querySelector('[data-action="apply-import"]');
+            if (applyButton) applyButton.disabled = false;
+            button.disabled = true;
+          } catch (error) { setResult('import-result', error.message || '审批失败。', 'error'); }
+          return;
+        }
+        if (action === 'apply-import') {
+          try {
+            const result = await jsonRequest(api.importApply, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+            const data = result.data && typeof result.data === 'object' ? result.data : result;
+            const s = data.summary || {};
+            const text = '导入完成：新增人员 ' + (s.created_users || 0) + '、账号资产 ' + (s.created_accounts || 0) + '、订阅 ' + (s.created_subscriptions || 0) + '、付款者 ' + (s.created_payers || 0) + '；跳过未变 ' + (s.skipped_unchanged || 0) + ' 条、来源已变更 ' + (s.skipped_changed || 0) + ' 条、异常 ' + (s.error_count || 0) + ' 条。';
+            setResult('import-result', text, s.error_count ? 'error' : 'success');
+            refreshAll();
+          } catch (error) { setResult('import-result', error.message || '导入失败。', 'error'); }
+          return;
         }
       });
-      if (config.page === 'profile') {
-        void loadIdentities();
-        void loadResumableLinkTransactions();
+      const onAccountsFilterChange = (event) => {
+        const el = event.target.closest('[data-accounts-filter]');
+        if (!el) return;
+        accountsFilterState[el.dataset.accountsFilter] = el.value;
+        applyAccountsFilter();
+      };
+      document.addEventListener('input', onAccountsFilterChange);
+      document.addEventListener('change', onAccountsFilterChange);
+      const renderBarChart = (container, series) => {
+        const width = 720;
+        const height = 210;
+        const padTop = 18;
+        const padBottom = 36;
+        const padLeft = 8;
+        const padRight = 8;
+        const innerWidth = width - padLeft - padRight;
+        const innerHeight = height - padTop - padBottom;
+        const maxValue = Math.max(...series.map((point) => point.value), 1);
+        const gap = 8;
+        const barWidth = Math.max(10, Math.floor((innerWidth - gap * (series.length - 1)) / series.length));
+        const totalWidth = barWidth * series.length + gap * (series.length - 1);
+        const offsetX = padLeft + Math.max(0, (innerWidth - totalWidth) / 2);
+        const parts = series.map((point, index) => {
+          const barHeight = Math.round((point.value / maxValue) * innerHeight);
+          const x = offsetX + index * (barWidth + gap);
+          const y = padTop + innerHeight - barHeight;
+          const amount = fen(point.value);
+          return '<g>'
+            + '<rect x="' + x + '" y="' + y + '" width="' + barWidth + '" height="' + Math.max(barHeight, point.value > 0 ? 2 : 0) + '" rx="4" fill="#3559e0"><title>' + escapeHtml(point.label + '：' + amount) + '</title></rect>'
+            + (point.value > 0 ? '<text x="' + (x + barWidth / 2) + '" y="' + (y - 5) + '" text-anchor="middle" class="chart-value">' + escapeHtml(amount) + '</text>' : '')
+            + '<text x="' + (x + barWidth / 2) + '" y="' + (height - 16) + '" text-anchor="middle" class="chart-axis">' + escapeHtml(point.label) + '</text>'
+            + '</g>';
+        });
+        parts.push('<line x1="' + padLeft + '" y1="' + (padTop + innerHeight) + '" x2="' + (width - padRight) + '" y2="' + (padTop + innerHeight) + '" stroke="#d3dae6" />');
+        container.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="近 12 个月已付款金额" style="width:100%">' + parts.join('') + '</svg>';
+      };
+      const renderPipelineChart = (container, parts) => {
+        const total = parts.reduce((sum, part) => sum + part.value, 0);
+        if (total <= 0) {
+          container.innerHTML = '<div class="empty-state"><strong>暂无报销数据</strong><span>产生候选与批次后会显示管线分布。</span></div>';
+          return;
+        }
+        const width = 720;
+        const barHeight = 30;
+        let offset = 0;
+        const segments = parts.map((part) => {
+          const x = offset;
+          const segWidth = (part.value / total) * width;
+          offset += segWidth;
+          return '<rect x="' + x.toFixed(2) + '" y="0" width="' + Math.max(segWidth, 0).toFixed(2) + '" height="' + barHeight + '" fill="' + part.color + '"><title>' + escapeHtml(part.label + '：' + fen(part.value)) + '</title></rect>';
+        });
+        const legend = parts.map((part) =>
+          '<span class="pipeline-legend-item"><span class="pipeline-dot" style="background:' + part.color + '"></span>' + escapeHtml(part.label) + ' ' + escapeHtml(fen(part.value)) + '</span>',
+        );
+        container.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + barHeight + '" role="img" aria-label="报销管线分布" style="width:100%;border-radius:8px;overflow:hidden">' + segments.join('') + '</svg><div class="pipeline-legend">' + legend.join('') + '</div>';
+      };
+      const loadFinanceOverview = async () => {
+        const monthlyPanel = document.getElementById('finance-monthly-chart');
+        const pipelinePanel = document.getElementById('finance-pipeline-chart');
+        if (!monthlyPanel || !pipelinePanel || !api.financeOverview) return;
+        try {
+          const payload = await jsonRequest(api.financeOverview);
+          const data = payload.data || {};
+          const setMetric = (label, value) => {
+            const el = document.querySelector('[data-metric="' + label + '"]');
+            if (el) el.textContent = value;
+          };
+          setMetric('本财年已付款', fen(data.paid_year && data.paid_year.total_cny_fen));
+          setMetric('本季度已付款', fen(data.paid_quarter && data.paid_quarter.total_cny_fen));
+          setMetric('本月已付款', fen(data.paid_month && data.paid_month.total_cny_fen));
+          setMetric('待报销金额', fen(data.pending_candidates && data.pending_candidates.total_cny_fen));
+          const monthly = Array.isArray(data.monthly_paid) ? data.monthly_paid : [];
+          renderBarChart(monthlyPanel, monthly.map((point) => ({ label: String(point.month || '').slice(2), value: point.total_cny_fen || 0 })));
+          renderPipelineChart(pipelinePanel, [
+            { label: '待报销', value: (data.pending_candidates && data.pending_candidates.total_cny_fen) || 0, color: '#a86200' },
+            { label: '待审核', value: (data.review_batches && data.review_batches.total_cny_fen) || 0, color: '#4968ca' },
+            { label: '待付款', value: (data.approved_batches && data.approved_batches.total_cny_fen) || 0, color: '#7c5ce0' },
+            { label: '已付款（财年）', value: (data.paid_year && data.paid_year.total_cny_fen) || 0, color: '#1d7a55' },
+          ]);
+        } catch (error) {
+          monthlyPanel.innerHTML = '<div class="empty-state"><strong>暂时无法读取财务总览</strong><span>' + escapeHtml(error.message || '') + '</span></div>';
+          pipelinePanel.innerHTML = '';
+        }
+      };
+      if (config.page === 'reimbursements' && api.dashboard) {
+        void jsonRequest(api.dashboard).then(updateDashboardMetrics).catch(() => {});
       }
+      if (config.page === 'finance') {
+        void loadFinanceOverview();
+      }
+      void loadOptionSelects();
       refreshAll();
     })();
   `;

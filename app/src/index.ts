@@ -7,25 +7,14 @@
 import { Hono, type Context } from 'hono';
 import {
   APP_ROLES,
-  resolveAccessProviderHint,
   resolveAuthenticatedIdentity,
   validateIdentityForEntry,
   type AppRole,
   type AuthenticatedIdentity,
   type Principal,
 } from './lib/auth';
-import { accessEntryForRequest, isAllowedEntryOrigin, type AccessEntry } from './lib/access-entry';
-import {
-  IdentityProblem,
-  IdentityStore,
-  type ResolvedIdentityPrincipal,
-} from './lib/identity-store';
-import {
-  FeishuBaseReader,
-  feishuSourceConfigFromEnv,
-  isFeishuImportConfigured,
-} from './lib/feishu-source';
-import { proposeFeishuFieldMapping, type FeishuTableMetadata } from './lib/feishu-mapping';
+import { accessEntryForRequest, isAllowedEntryOrigin, normalizeVerifiedEmail, type AccessEntry } from './lib/access-entry';
+import { IdentityProblem, IdentityStore } from './lib/identity-store';
 import { fetchCnyRate, rateToMinorUnitRational } from './lib/fx';
 import {
   buildAccrualCandidates,
@@ -42,17 +31,13 @@ import type { Env } from './lib/types';
 import {
   renderAdminUi,
   renderCorporateAccessRequiredUi,
-  renderExternalAccessRequiredUi,
-  renderExternalIdentityUi,
   uiPageFromPath,
   type UiPage,
 } from './ui';
 
 type AppVariables = {
   entry: AccessEntry | null;
-  signedIdentity: AuthenticatedIdentity | null;
   principal: Principal | null;
-  identityPrincipal: ResolvedIdentityPrincipal | null;
 };
 
 export type AppBindings = {
@@ -73,6 +58,7 @@ type CandidateDbRow = PersistedCandidateForSubmission & {
 export interface AppDependencies {
   resolveIdentity?: (request: Request, env: Env, entry: AccessEntry) => Promise<AuthenticatedIdentity | null>;
   now?: () => Date;
+  fetcher?: typeof fetch;
 }
 
 const GLOBAL_READ_ROLES: AppRole[] = [
@@ -210,28 +196,10 @@ function isResponse(value: Principal | Response): value is Response {
   return value instanceof Response;
 }
 
-function requireCorporatePrimary(c: AppContext): ResolvedIdentityPrincipal | Response {
-  const originFailure = ensureMutationOrigin(c);
-  if (originFailure) return originFailure;
-  const entry = c.get('entry');
-  const principal = c.get('identityPrincipal');
-  if (entry?.kind !== 'corporate' || !principal) {
-    return problem(c, 401, 'authentication_required', '需要通过企业入口使用已开通的企业身份。');
-  }
-  if (principal.identityKind !== 'corporate_primary') {
-    return problem(c, 403, 'corporate_identity_required', '需要企业主身份完成此操作。');
-  }
-  return principal;
-}
-
-function isIdentityResponse(value: ResolvedIdentityPrincipal | Response): value is Response {
-  return value instanceof Response;
-}
-
 function identityProblemResponse(c: AppContext, error: IdentityProblem): Response {
   const status = error.code === 'identity_store_unavailable'
     ? 503
-    : error.code === 'corporate_email_required' || error.code === 'corporate_identity_required'
+    : error.code === 'corporate_email_required' || error.code === 'corporate_identity_required' || error.code === 'email_not_whitelisted'
       ? 403
       : error.code === 'identity_kind_conflict' || error.code === 'identity_already_bound'
         ? 409
@@ -263,6 +231,21 @@ async function appendAudit(
 function placeholderList(ids: string[]): string {
   if (ids.length === 0) throw new ApiProblem(400, 'empty_selection', '至少选择一条候选费用。');
   return ids.map(() => '?').join(', ');
+}
+
+function assertCutoffNotFuture(cutoffDate: string): void {
+  if (cutoffDate > shanghaiBusinessDate()) {
+    throw new ApiProblem(400, 'cutoff_in_future', '报销截止日不能晚于今天；系统不允许提前开始未来的报销。');
+  }
+}
+
+/** 报销截止日可选：缺省按 Asia/Shanghai 业务当天；任何情况都不允许未来日期。 */
+function resolveCutoffDate(body: Record<string, unknown>): string {
+  const cutoffDate = body.cutoff_date === undefined || body.cutoff_date === null || body.cutoff_date === ''
+    ? shanghaiBusinessDate()
+    : isoDate(requiredString(body, 'cutoff_date', 10), 'cutoff_date');
+  assertCutoffNotFuture(cutoffDate);
+  return cutoffDate;
 }
 
 async function pendingCandidatesForSelection(
@@ -300,33 +283,63 @@ async function pendingCandidatesForSelection(
   if (candidates.length !== candidateIds.length) {
     throw new ApiProblem(409, 'candidate_unavailable', '所选候选中存在已入批、已付款或不存在的记录；本次未创建任何批次。');
   }
-  if (!isGlobalReader(principal)) {
-    const canReadPayer = principal.roles.includes('payer');
-    if (!canReadPayer || candidates.some((candidate) => candidate.payer_owner_user_id !== principal.userId)) {
-      throw new ApiProblem(403, 'payer_scope_denied', '付款者只能操作归属自己的候选费用。');
-    }
+  if (!isGlobalReader(principal) && candidates.some((candidate) => candidate.payer_owner_user_id !== principal.userId)) {
+    throw new ApiProblem(403, 'payer_scope_denied', '只能操作付款者为自己的候选费用。');
   }
   return candidates;
+}
+
+async function fetchMonthlyPaidSeries(env: Env): Promise<Array<{ month: string; total_cny_fen: number }>> {
+  const today = shanghaiBusinessDate();
+  const monthIndex = Number(today.slice(0, 4)) * 12 + Number(today.slice(5, 7)) - 1 - 11;
+  const startMonth = `${Math.floor(monthIndex / 12)}-${String((monthIndex % 12) + 1).padStart(2, '0')}-01`;
+  const rows = await env.DB.prepare(
+    `SELECT strftime('%Y-%m', paid_at) AS month, COALESCE(SUM(total_cny_fen), 0) AS total_cny_fen
+     FROM reimbursement_batches
+     WHERE status = 'paid' AND paid_at >= ?
+     GROUP BY month ORDER BY month`,
+  ).bind(startMonth).all<{ month: string; total_cny_fen: number }>();
+  const byMonth = new Map(rows.results.map((row) => [row.month, row.total_cny_fen]));
+  const series: Array<{ month: string; total_cny_fen: number }> = [];
+  const cursor = new Date(`${startMonth}T00:00:00.000Z`);
+  for (let index = 0; index < 12; index += 1) {
+    const key = cursor.toISOString().slice(0, 7);
+    series.push({ month: key, total_cny_fen: byMonth.get(key) ?? 0 });
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+  return series;
 }
 
 async function fetchBatchForScope(
   env: Env,
   principal: Principal,
   batchId: string,
-): Promise<{ id: string; status: string; payer_id: string; payer_owner_user_id: string | null } | null> {
+): Promise<{ id: string; status: string; payer_id: string; payer_owner_user_id: string | null; reviewer_user_id: string | null } | null> {
   const batch = await env.DB.prepare(
-    `SELECT batch.id, batch.status, batch.payer_id, payer.owner_user_id AS payer_owner_user_id
+    `SELECT batch.id, batch.status, batch.payer_id, batch.reviewer_user_id, payer.owner_user_id AS payer_owner_user_id
      FROM reimbursement_batches AS batch
      JOIN payers AS payer ON payer.id = batch.payer_id
      WHERE batch.id = ?`,
   )
     .bind(batchId)
-    .first<{ id: string; status: string; payer_id: string; payer_owner_user_id: string | null }>();
+    .first<{ id: string; status: string; payer_id: string; payer_owner_user_id: string | null; reviewer_user_id: string | null }>();
   if (!batch) return null;
-  if (!isGlobalReader(principal) && (!principal.roles.includes('payer') || batch.payer_owner_user_id !== principal.userId)) {
-    throw new ApiProblem(403, 'payer_scope_denied', '付款者只能操作归属自己的报销批次。');
+  const canAccess = isGlobalReader(principal)
+    || batch.payer_owner_user_id === principal.userId
+    || batch.reviewer_user_id === principal.userId;
+  if (!canAccess) {
+    throw new ApiProblem(403, 'payer_scope_denied', '只能操作付款者为自己或指派给自己审批的报销批次。');
   }
   return batch;
+}
+
+/** 审批/付款必须由被指派的审批人完成；system_admin 可代行，历史无指派批次维持财务角色可办。 */
+function assertBatchReviewer(principal: Principal, batch: { reviewer_user_id: string | null }): void {
+  if (principal.roles.includes('system_admin')) return;
+  if (!batch.reviewer_user_id) return;
+  if (batch.reviewer_user_id !== principal.userId) {
+    throw new ApiProblem(403, 'reviewer_required', '该批次已指派给其他审批人，只能由其完成审批。');
+  }
 }
 
 async function deriveBatchWatermarks(env: Env, batchId: string): Promise<Array<{ payerAssignmentId: string; reimbursedThrough: string | null }>> {
@@ -457,10 +470,324 @@ async function syncConfiguredFxRates(env: Env): Promise<{
   }
 }
 
+async function findUniqueUserIdByName(
+  env: Env,
+  displayName: string,
+): Promise<{ outcome: 'found'; userId: string } | { outcome: 'none' } | { outcome: 'ambiguous' }> {
+  const rows = await env.DB.prepare('SELECT id FROM users WHERE display_name = ?')
+    .bind(displayName)
+    .all<{ id: string }>();
+  if (rows.results.length > 1) return { outcome: 'ambiguous' };
+  if (rows.results.length === 1) return { outcome: 'found', userId: rows.results[0]!.id };
+  return { outcome: 'none' };
+}
+
+/** 导入创建的人员不是登录身份：不写 email / external_subject，也不授予任何角色。 */
+async function createImportedUser(env: Env, displayName: string): Promise<string> {
+  const userId = crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO users (id, display_name, employment_status) VALUES (?, ?, 'active')`)
+    .bind(userId, displayName)
+    .run();
+  return userId;
+}
+
+type CandidateGenerationSource = {
+  term_version_id: string;
+  subscription_id: string;
+  billing_cycle: 'monthly' | 'quarterly' | 'yearly' | 'one_time';
+  settlement_mode: 'actual_bill' | 'accrual';
+  term_effective_start: string;
+  term_effective_end: string | null;
+  billing_anchor_date: string;
+  original_currency: string;
+  amount_minor: number;
+  payer_assignment_id: string;
+  payer_id: string;
+  payer_effective_start: string;
+  payer_effective_end: string | null;
+};
+
+function laterDate(left: string, right: string): string {
+  return left > right ? left : right;
+}
+
+async function latestLockedFxRate(
+  env: Env,
+  currency: string,
+  cutoffDate: string,
+): Promise<{ fxQuoteId: string | null; rateNumerator: number; rateDenominator: number }> {
+  if (currency === 'CNY') return { fxQuoteId: null, rateNumerator: 1, rateDenominator: 1 };
+  const quote = await env.DB.prepare(
+    `SELECT id, rate_numerator, rate_denominator
+     FROM fx_quotes
+     WHERE base_currency = ? AND quote_currency = 'CNY'
+       AND status IN ('verified', 'manual') AND effective_at <= ?
+     ORDER BY effective_at DESC, fetched_at DESC
+     LIMIT 1`,
+  ).bind(currency, cutoffDate).first<{ id: string; rate_numerator: number; rate_denominator: number }>();
+  if (!quote) throw new ApiProblem(409, 'missing_fx_quote', `${currency} 在 ${cutoffDate} 前没有可锁定的 CNY 汇率快照。`);
+  return { fxQuoteId: quote.id, rateNumerator: quote.rate_numerator, rateDenominator: quote.rate_denominator };
+}
+
+/**
+ * 锁定订阅开始日当天的 CNY 汇率：优先使用当天已有快照；缺失且配置了汇率服务时
+ * 自动抓取该日历史汇率入库后锁定；服务不可用时不猜测，明确报错等待人工处理。
+ */
+async function fxRateForSubscriptionStart(
+  env: Env,
+  currency: string,
+  startDate: string,
+  cutoffDate: string,
+  fetcher: typeof fetch,
+): Promise<{ fxQuoteId: string | null; rateNumerator: number; rateDenominator: number }> {
+  if (currency === 'CNY') return { fxQuoteId: null, rateNumerator: 1, rateDenominator: 1 };
+  const exact = await env.DB.prepare(
+    `SELECT id, rate_numerator, rate_denominator
+     FROM fx_quotes
+     WHERE base_currency = ? AND quote_currency = 'CNY'
+       AND status IN ('verified', 'manual') AND effective_at = ?
+     ORDER BY fetched_at DESC LIMIT 1`,
+  ).bind(currency, startDate).first<{ id: string; rate_numerator: number; rate_denominator: number }>();
+  if (exact) return { fxQuoteId: exact.id, rateNumerator: exact.rate_numerator, rateDenominator: exact.rate_denominator };
+  if (env.FX_PROVIDER && env.FX_PROVIDER_URL) {
+    let quote: Awaited<ReturnType<typeof fetchCnyRate>>;
+    try {
+      quote = await fetchCnyRate({
+        baseCurrency: currency,
+        providerUrl: env.FX_PROVIDER_URL,
+        ...(env.FX_API_KEY ? { apiKey: env.FX_API_KEY } : {}),
+        date: startDate,
+        fetcher,
+      });
+    } catch {
+      throw new ApiProblem(502, 'fx_provider_request_failed', `${currency} 在 ${startDate} 的历史汇率抓取失败；请稍后重试或人工补录。`);
+    }
+    const rational = rateToMinorUnitRational(quote.cnyPerWholeUnit, currencyMinorDigits(currency));
+    const effectiveAt = quote.providerReference && /^\d{4}-\d{2}-\d{2}$/.test(quote.providerReference)
+      ? quote.providerReference
+      : startDate;
+    await env.DB.prepare(
+      `INSERT INTO fx_quotes (
+         id, base_currency, quote_currency, rate_numerator, rate_denominator,
+         effective_at, provider, provider_reference, raw_response_hash, status, locked_at
+       ) VALUES (?, ?, 'CNY', ?, ?, ?, ?, ?, ?, 'verified', datetime('now'))
+       ON CONFLICT(base_currency, quote_currency, effective_at, provider) DO NOTHING`,
+    ).bind(
+      crypto.randomUUID(),
+      currency,
+      rational.numerator,
+      rational.denominator,
+      effectiveAt,
+      env.FX_PROVIDER,
+      quote.providerReference ?? null,
+      await sha256Hex(quote.rawResponse),
+    ).run();
+    const stored = await env.DB.prepare(
+      `SELECT id, rate_numerator, rate_denominator
+       FROM fx_quotes
+       WHERE base_currency = ? AND quote_currency = 'CNY' AND effective_at = ? AND provider = ?
+       LIMIT 1`,
+    ).bind(currency, effectiveAt, env.FX_PROVIDER).first<{ id: string; rate_numerator: number; rate_denominator: number }>();
+    if (stored) return { fxQuoteId: stored.id, rateNumerator: stored.rate_numerator, rateDenominator: stored.rate_denominator };
+  }
+  return latestLockedFxRate(env, currency, cutoffDate);
+}
+
+async function paidWatermarkForAssignment(
+  env: Env,
+  source: CandidateGenerationSource,
+): Promise<string | null> {
+  const paid = await env.DB.prepare(
+    `SELECT item.coverage_start AS start, item.coverage_end AS end
+     FROM reimbursement_items AS item
+     JOIN reimbursement_candidates AS candidate ON candidate.id = item.candidate_id
+     WHERE candidate.subscription_term_version_id = ?
+       AND candidate.payer_assignment_id = ?
+       AND item.status = 'paid'
+     ORDER BY item.coverage_start`,
+  ).bind(source.term_version_id, source.payer_assignment_id).all<{ start: string; end: string }>();
+  return deriveContiguousPaidThrough({
+    startDate: laterDate(source.term_effective_start, source.payer_effective_start),
+    paidCoverages: paid.results,
+  });
+}
+
+/**
+ * 根据版本化条款、付款者有效期和连续已付款水位生成候选。它只创建未存在的
+ * 费用快照；实际报销选择仍由单独的 batch API 管理。
+ */
+async function generateReimbursementCandidates(
+  env: Env,
+  options: {
+    cutoffDate: string;
+    fetcher: typeof fetch;
+    subscriptionId?: string | null;
+    payerOwnerUserId?: string | null;
+  },
+): Promise<{
+  generated: number;
+  skipped_existing: number;
+  source_count: number;
+  drafted_count: number;
+  cutoff_date: string;
+}> {
+  const { cutoffDate, fetcher } = options;
+  const subscriptionId = options.subscriptionId ?? null;
+  const payerOwnerUserId = options.payerOwnerUserId ?? null;
+  const sources = payerOwnerUserId
+    ? await env.DB.prepare(
+      `SELECT
+         term.id AS term_version_id, subscription.id AS subscription_id,
+         term.billing_cycle, term.settlement_mode,
+         term.effective_start AS term_effective_start, term.effective_end AS term_effective_end,
+         term.billing_anchor_date, term.original_currency, term.amount_minor,
+         assignment.id AS payer_assignment_id, assignment.payer_id,
+         assignment.effective_start AS payer_effective_start, assignment.effective_end AS payer_effective_end
+       FROM subscription_term_versions AS term
+       JOIN subscriptions AS subscription ON subscription.id = term.subscription_id
+       JOIN payer_assignments AS assignment ON assignment.subscription_id = subscription.id
+       JOIN payers AS payer ON payer.id = assignment.payer_id
+       WHERE subscription.status = 'active'
+         AND term.effective_start <= ?
+         AND (term.effective_end IS NULL OR term.effective_end >= ?)
+         AND assignment.effective_start <= ?
+         AND (assignment.effective_end IS NULL OR assignment.effective_end >= ?)
+         AND payer.owner_user_id = ?
+         AND (? IS NULL OR subscription.id = ?)
+       ORDER BY subscription.id, term.effective_start, assignment.effective_start`,
+    ).bind(cutoffDate, cutoffDate, cutoffDate, cutoffDate, payerOwnerUserId, subscriptionId, subscriptionId).all<CandidateGenerationSource>()
+    : await env.DB.prepare(
+      `SELECT
+         term.id AS term_version_id, subscription.id AS subscription_id,
+         term.billing_cycle, term.settlement_mode,
+         term.effective_start AS term_effective_start, term.effective_end AS term_effective_end,
+         term.billing_anchor_date, term.original_currency, term.amount_minor,
+         assignment.id AS payer_assignment_id, assignment.payer_id,
+         assignment.effective_start AS payer_effective_start, assignment.effective_end AS payer_effective_end
+       FROM subscription_term_versions AS term
+       JOIN subscriptions AS subscription ON subscription.id = term.subscription_id
+       JOIN payer_assignments AS assignment ON assignment.subscription_id = subscription.id
+       WHERE subscription.status = 'active'
+         AND term.effective_start <= ?
+         AND (term.effective_end IS NULL OR term.effective_end >= ?)
+         AND assignment.effective_start <= ?
+         AND (assignment.effective_end IS NULL OR assignment.effective_end >= ?)
+         AND (? IS NULL OR subscription.id = ?)
+       ORDER BY subscription.id, term.effective_start, assignment.effective_start`,
+    ).bind(cutoffDate, cutoffDate, cutoffDate, cutoffDate, subscriptionId, subscriptionId).all<CandidateGenerationSource>();
+
+  const drafts: Array<{
+    termVersionId: string;
+    payerAssignmentId: string;
+    fxQuoteId: string | null;
+    coverageStart: string;
+    coverageEnd: string;
+    originalCurrency: string;
+    originalAmountMinor: number;
+    rateNumerator: number;
+    rateDenominator: number;
+    cnyAmountFen: number;
+  }> = [];
+  for (const source of sources.results) {
+    const fx = await fxRateForSubscriptionStart(env, source.original_currency, source.term_effective_start, cutoffDate, fetcher);
+    const lastReimbursedThrough = await paidWatermarkForAssignment(env, source);
+    const request = {
+      subscriptionId: source.subscription_id,
+      payerId: source.payer_id,
+      currency: source.original_currency,
+      amountMinor: source.amount_minor,
+      billingCycle: source.billing_cycle,
+      billingAnchorDate: source.billing_anchor_date,
+      subscriptionStartDate: source.term_effective_start,
+      ...(source.term_effective_end ? { subscriptionEndDate: source.term_effective_end } : {}),
+      payerActiveFrom: source.payer_effective_start,
+      ...(source.payer_effective_end ? { payerActiveUntil: source.payer_effective_end } : {}),
+      ...(lastReimbursedThrough ? { lastReimbursedThrough } : {}),
+      cutoffDate,
+      rate: { numerator: fx.rateNumerator, denominator: fx.rateDenominator },
+    };
+    const generated = source.settlement_mode === 'actual_bill'
+      ? buildActualBillCandidates(request)
+      : buildAccrualCandidates(request);
+    for (const candidate of generated) {
+      drafts.push({
+        termVersionId: source.term_version_id,
+        payerAssignmentId: source.payer_assignment_id,
+        fxQuoteId: fx.fxQuoteId,
+        coverageStart: candidate.coverageStart,
+        coverageEnd: candidate.coverageEnd,
+        originalCurrency: candidate.originalCurrency,
+        originalAmountMinor: candidate.originalAmountMinor,
+        rateNumerator: candidate.rateNumerator,
+        rateDenominator: candidate.rateDenominator,
+        cnyAmountFen: candidate.cnyAmountFen,
+      });
+    }
+  }
+  if (drafts.length === 0) {
+    return { generated: 0, skipped_existing: 0, source_count: sources.results.length, drafted_count: 0, cutoff_date: cutoffDate };
+  }
+  const statements: D1PreparedStatement[] = drafts.map((candidate) => env.DB.prepare(
+    `INSERT INTO reimbursement_candidates (
+       id, subscription_term_version_id, payer_assignment_id,
+       coverage_start, coverage_end, original_currency, original_amount_minor,
+       fx_quote_id, rate_numerator, rate_denominator, cny_amount_fen, status
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+     ON CONFLICT DO NOTHING`,
+  ).bind(
+    crypto.randomUUID(),
+    candidate.termVersionId,
+    candidate.payerAssignmentId,
+    candidate.coverageStart,
+    candidate.coverageEnd,
+    candidate.originalCurrency,
+    candidate.originalAmountMinor,
+    candidate.fxQuoteId,
+    candidate.rateNumerator,
+    candidate.rateDenominator,
+    candidate.cnyAmountFen,
+  ));
+  const results = await env.DB.batch(statements);
+  const inserted = results.filter((result) => result.meta.changes === 1).length;
+  return {
+    generated: inserted,
+    skipped_existing: drafts.length - inserted,
+    source_count: sources.results.length,
+    drafted_count: drafts.length,
+    cutoff_date: cutoffDate,
+  };
+}
+
+/** 每日自动生成报销候选：账期开始日到达当天即入池，幂等跳过既有；失败只留记录。 */
+async function scheduledCandidateGeneration(env: Env): Promise<void> {
+  const runId = crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO sync_runs (id, kind, status) VALUES (?, 'candidate_generation', 'running')`).bind(runId).run();
+  try {
+    const cutoffDate = shanghaiBusinessDate();
+    const result = await generateReimbursementCandidates(env, { cutoffDate, fetcher: fetch });
+    await env.DB.prepare(
+      `UPDATE sync_runs SET status = 'success', finished_at = datetime('now'), detail_json = ? WHERE id = ?`,
+    ).bind(
+      JSON.stringify({
+        cutoff_date: cutoffDate,
+        generated: result.generated,
+        skipped_existing: result.skipped_existing,
+        source_count: result.source_count,
+      }),
+      runId,
+    ).run();
+  } catch {
+    await env.DB.prepare(
+      `UPDATE sync_runs SET status = 'failed', finished_at = datetime('now'), error_code = 'candidate_generation_failed' WHERE id = ?`,
+    ).bind(runId).run();
+  }
+}
+
 export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings> {
   const app = new Hono<AppBindings>();
   const resolveIdentity = dependencies.resolveIdentity ?? resolveAuthenticatedIdentity;
   const now = dependencies.now ?? (() => new Date());
+  const fetcher = dependencies.fetcher ?? fetch;
 
   app.onError((error, c) => {
     if (error instanceof ApiProblem) {
@@ -471,15 +798,24 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
     return c.json({ error: { code: 'internal_error', message: '系统暂时无法处理该请求。' } }, 500);
   });
 
+  // 页面与 API 一律 no-store：部署后浏览器必须拿到最新代码与数据，杜绝启发式缓存。
+  app.use('*', async (c, next) => {
+    try {
+      await next();
+    } finally {
+      c.header('Cache-Control', 'no-store');
+    }
+  });
+
   app.use('*', async (c, next) => {
     const requestUrl = new URL(c.req.url);
     const entry = accessEntryForRequest(requestUrl.host, c.env);
     if (!entry) return problem(c, 404, 'unknown_entry_host', '请求的系统入口不存在。');
 
     c.set('entry', entry);
-    c.set('signedIdentity', null);
+
     c.set('principal', null);
-    c.set('identityPrincipal', null);
+    c.set('principal', null);
 
     if (entry.kind === 'legacy') {
       if (c.req.method === 'GET' || c.req.method === 'HEAD') {
@@ -494,26 +830,12 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
       const identity = await resolveIdentity(c.req.raw, c.env, entry);
       if (!identity) return next();
       validateIdentityForEntry(identity, entry);
-      c.set('signedIdentity', identity);
 
       const store = new IdentityStore(c.env.DB);
-      const principal = entry.kind === 'corporate'
-        ? await store.ensureCorporatePrincipal(identity, {
-          migrationAdminEmail: c.env.MIGRATION_SYSTEM_ADMIN_EMAIL,
-        })
-        : await store.resolve(identity, 'external');
-      if (principal) {
-        c.set('principal', principal);
-        c.set('identityPrincipal', principal);
-      }
-      if (
-        entry.kind === 'external'
-        && !principal
-        && c.req.path.startsWith('/api/')
-        && c.req.path !== '/api/external/identity-presentations'
-      ) {
-        return problem(c, 401, 'authentication_required', '该外部身份尚未绑定系统账户。');
-      }
+      const principal = await store.ensureCorporatePrincipal(identity, {
+        migrationAdminEmail: c.env.MIGRATION_SYSTEM_ADMIN_EMAIL,
+      });
+      if (principal) c.set('principal', principal);
     } catch (error) {
       if (error instanceof IdentityProblem) throw error;
       return problem(c, 401, 'invalid_access_assertion', '登录断言无效、过期或不属于本应用。');
@@ -526,9 +848,16 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
       ok: true,
       service: 'lan-cloud-internal-expense',
       deployment_mode: c.env.ENVIRONMENT,
-      feishu_import_enabled: c.env.FEISHU_IMPORT_ENABLED === '1',
     }),
   );
+
+// 应用级 /cdn-cgi/access/logout 只清本应用会话；全局（团队域）会话仍在，
+// 其他入口会被 SSO 静默续期。真正的“登出所有入口”必须跳团队域登出。
+app.get('/logout', (c) => {
+  const issuer = c.env.ACCESS_ISSUER?.replace(/\/+$/, '');
+  if (issuer) return c.redirect(`${issuer}/cdn-cgi/access/logout`, 302);
+  return c.redirect('/cdn-cgi/access/logout', 302);
+});
 
 app.get('/api/session', (c) => {
   const principal = c.get('principal');
@@ -544,82 +873,36 @@ app.get('/api/session', (c) => {
   });
 });
 
-app.get('/api/me/identities', async (c) => {
-  const auth = requireCorporatePrimary(c);
-  if (isIdentityResponse(auth)) return auth;
-  const identities = await new IdentityStore(c.env.DB).listMaskedIdentities(auth);
-  return c.json({ data: { identities } });
-});
-
-app.get('/api/me/identities/link-transactions/recovery', async (c) => {
-  const auth = requireCorporatePrimary(c);
-  if (isIdentityResponse(auth)) return auth;
-  const transactions = await new IdentityStore(c.env.DB).listResumableLinkTransactions(auth, now());
-  return c.json({ data: { transactions } });
-});
-
-app.post('/api/me/identities/link-transactions', async (c) => {
-  const auth = requireCorporatePrimary(c);
-  if (isIdentityResponse(auth)) return auth;
-  const transaction = await new IdentityStore(c.env.DB).beginLinkTransaction(auth, now());
-  return c.json({
-    data: {
-      id: transaction.id,
-      code: transaction.secret,
-      expires_at: transaction.expiresAt,
-      external_url: 'https://external-ie-oa.lancloudtech.com/',
-    },
-  }, 201);
-});
-
-app.post('/api/external/identity-presentations', async (c) => {
-  const originFailure = ensureMutationOrigin(c);
-  if (originFailure) return originFailure;
-  if (c.get('entry')?.kind !== 'external') {
-    return problem(c, 401, 'authentication_required', '需要通过外部登录入口完成身份绑定。');
-  }
-  const identity = c.get('signedIdentity');
-  if (!identity) return problem(c, 401, 'authentication_required', '需要有效的外部登录身份。');
-  const body = await jsonBody(c);
-  const code = requiredString(body, 'code', 64);
-  try {
-    const providerHint = await resolveAccessProviderHint(c.req.raw);
-    await new IdentityStore(c.env.DB).presentExternalIdentity(identity, code, providerHint, now());
-  } catch {
-    // This endpoint must not reveal whether a code, account, transaction, or identity exists.
-    return problem(c, 400, 'identity_presentation_rejected', '绑定请求未被接受。');
-  }
-  return c.body(null, 204);
-});
-
-app.post('/api/me/identities/link-transactions/:id/confirm', async (c) => {
-  const auth = requireCorporatePrimary(c);
-  if (isIdentityResponse(auth)) return auth;
-  const store = new IdentityStore(c.env.DB);
-  await store.confirmLinkTransaction(auth, c.req.param('id'), now());
-  return c.json({ data: { identities: await store.listMaskedIdentities(auth) } });
-});
-
-app.delete('/api/me/identities/:id', async (c) => {
-  const auth = requireCorporatePrimary(c);
-  if (isIdentityResponse(auth)) return auth;
-  const store = new IdentityStore(c.env.DB);
-  await store.revokeLinkedIdentity(auth, c.req.param('id'));
-  return c.json({ data: { identities: await store.listMaskedIdentities(auth) } });
-});
-
 app.get('/api/dashboard', async (c) => {
   const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer', 'employee']);
   if (isResponse(auth)) return auth;
-  const employeeOnly = auth.roles.includes('employee') && !isGlobalReader(auth) && !auth.roles.includes('payer');
-  if (employeeOnly) {
-    // Employees never query global reimbursement, batch, FX, or import tables.
-    const ownedResults = await c.env.DB.batch([
+  if (!isGlobalReader(auth)) {
+    // 员工只读自己的范围：归属资产 + 付款者为自己的报销指标，绝不查询全局表。
+    const personalResults = await c.env.DB.batch([
       c.env.DB.prepare(
         `SELECT COUNT(*) AS count FROM subscriptions WHERE owner_user_id = ?`,
       ).bind(auth.userId),
       c.env.DB.prepare(
         `SELECT COUNT(*) AS count FROM account_assets WHERE owner_user_id = ?`,
+      ).bind(auth.userId),
+      c.env.DB.prepare(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(candidate.cny_amount_fen), 0) AS total_cny_fen
+         FROM reimbursement_candidates AS candidate
+         JOIN payer_assignments AS assignment ON assignment.id = candidate.payer_assignment_id
+         JOIN payers AS payer ON payer.id = assignment.payer_id
+         WHERE candidate.status = 'pending' AND payer.owner_user_id = ?`,
+      ).bind(auth.userId),
+      c.env.DB.prepare(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(batch.total_cny_fen), 0) AS total_cny_fen
+         FROM reimbursement_batches AS batch
+         JOIN payers AS payer ON payer.id = batch.payer_id
+         WHERE batch.status IN ('submitted', 'reviewing', 'approved') AND payer.owner_user_id = ?`,
+      ).bind(auth.userId),
+      c.env.DB.prepare(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(batch.total_cny_fen), 0) AS total_cny_fen
+         FROM reimbursement_batches AS batch
+         JOIN payers AS payer ON payer.id = batch.payer_id
+         WHERE batch.status = 'paid' AND payer.owner_user_id = ?`,
       ).bind(auth.userId),
     ]);
     return c.json({
@@ -627,47 +910,91 @@ app.get('/api/dashboard', async (c) => {
         pending_candidates: { count: 0, total_cny_fen: 0 },
         review_batches: { count: 0 },
         fx_exceptions: { count: 0 },
-        import_exceptions: { count: 0 },
-        owned_subscriptions: ownedResults[0]?.results[0] ?? { count: 0 },
-        owned_account_assets: ownedResults[1]?.results[0] ?? { count: 0 },
+        owned_subscriptions: personalResults[0]?.results[0] ?? { count: 0 },
+        owned_account_assets: personalResults[1]?.results[0] ?? { count: 0 },
+        my_pending_candidates: personalResults[2]?.results[0] ?? { count: 0, total_cny_fen: 0 },
+        my_inflight_batches: personalResults[3]?.results[0] ?? { count: 0, total_cny_fen: 0 },
+        my_paid_batches: personalResults[4]?.results[0] ?? { count: 0, total_cny_fen: 0 },
       },
     });
   }
-  const payerScoped = !isGlobalReader(auth) && auth.roles.includes('payer');
-  const candidateStatement = payerScoped
-    ? c.env.DB.prepare(
-      `SELECT COUNT(*) AS count, COALESCE(SUM(candidate.cny_amount_fen), 0) AS total_cny_fen
-       FROM reimbursement_candidates AS candidate
-       JOIN payer_assignments AS assignment ON assignment.id = candidate.payer_assignment_id
-       JOIN payers AS payer ON payer.id = assignment.payer_id
-       WHERE candidate.status = 'pending' AND payer.owner_user_id = ?`,
-    ).bind(auth.userId)
-    : c.env.DB.prepare(
+  const dashboardResults = await c.env.DB.batch([
+    c.env.DB.prepare(
       `SELECT COUNT(*) AS count, COALESCE(SUM(cny_amount_fen), 0) AS total_cny_fen
        FROM reimbursement_candidates WHERE status = 'pending'`,
-    );
-  const batchStatement = payerScoped
-    ? c.env.DB.prepare(
-      `SELECT COUNT(*) AS count FROM reimbursement_batches AS batch
-       JOIN payers AS payer ON payer.id = batch.payer_id
-       WHERE batch.status IN ('submitted', 'reviewing', 'approved') AND payer.owner_user_id = ?`,
-    ).bind(auth.userId)
-    : c.env.DB.prepare(
+    ),
+    c.env.DB.prepare(
       `SELECT COUNT(*) AS count FROM reimbursement_batches
        WHERE status IN ('submitted', 'reviewing', 'approved')`,
-    );
-  const dashboardResults = await c.env.DB.batch([
-    candidateStatement,
-    batchStatement,
+    ),
     c.env.DB.prepare(`SELECT COUNT(*) AS count FROM fx_quotes WHERE status IN ('stale', 'failed')`),
-    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM source_import_runs WHERE status IN ('failed', 'schema_drift')`),
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(total_cny_fen), 0) AS total_cny_fen
+       FROM reimbursement_batches WHERE status IN ('submitted', 'reviewing', 'approved')`,
+    ),
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(total_cny_fen), 0) AS total_cny_fen
+       FROM reimbursement_batches WHERE status = 'paid'`,
+    ),
   ]);
   return c.json({
     data: {
       pending_candidates: dashboardResults[0]?.results[0] ?? { count: 0, total_cny_fen: 0 },
       review_batches: dashboardResults[1]?.results[0] ?? { count: 0 },
       fx_exceptions: dashboardResults[2]?.results[0] ?? { count: 0 },
-      import_exceptions: dashboardResults[3]?.results[0] ?? { count: 0 },
+      inflight_batches: dashboardResults[3]?.results[0] ?? { count: 0, total_cny_fen: 0 },
+      paid_summary: dashboardResults[4]?.results[0] ?? { count: 0, total_cny_fen: 0 },
+      monthly_paid: await fetchMonthlyPaidSeries(c.env),
+    },
+  });
+});
+
+app.get('/api/finance/overview', async (c) => {
+  const auth = requireRoles(c, ['system_admin', 'finance_reviewer', 'auditor']);
+  if (isResponse(auth)) return auth;
+  const today = shanghaiBusinessDate();
+  const year = today.slice(0, 4);
+  const month = today.slice(0, 7);
+  const quarterStartMonth = String(Math.floor((Number(today.slice(5, 7)) - 1) / 3) * 3 + 1).padStart(2, '0');
+  const quarterStart = `${year}-${quarterStartMonth}-01`;
+
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(cny_amount_fen), 0) AS total_cny_fen
+       FROM reimbursement_candidates WHERE status = 'pending'`,
+    ),
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(total_cny_fen), 0) AS total_cny_fen
+       FROM reimbursement_batches WHERE status IN ('submitted', 'reviewing')`,
+    ),
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(total_cny_fen), 0) AS total_cny_fen
+       FROM reimbursement_batches WHERE status = 'approved'`,
+    ),
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(total_cny_fen), 0) AS total_cny_fen
+       FROM reimbursement_batches WHERE status = 'paid' AND paid_at >= ?`,
+    ).bind(`${year}-01-01`),
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(total_cny_fen), 0) AS total_cny_fen
+       FROM reimbursement_batches WHERE status = 'paid' AND paid_at >= ?`,
+    ).bind(quarterStart),
+    c.env.DB.prepare(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(total_cny_fen), 0) AS total_cny_fen
+       FROM reimbursement_batches WHERE status = 'paid' AND paid_at >= ?`,
+    ).bind(`${month}-01`),
+  ]);
+
+  return c.json({
+    data: {
+      as_of: today,
+      pending_candidates: results[0]?.results[0] ?? { count: 0, total_cny_fen: 0 },
+      review_batches: results[1]?.results[0] ?? { count: 0, total_cny_fen: 0 },
+      approved_batches: results[2]?.results[0] ?? { count: 0, total_cny_fen: 0 },
+      paid_year: { period: year, ...(results[3]?.results[0] ?? { count: 0, total_cny_fen: 0 }) },
+      paid_quarter: { period: `${year}-Q${String(Math.floor((Number(today.slice(5, 7)) - 1) / 3) + 1)}`, ...(results[4]?.results[0] ?? { count: 0, total_cny_fen: 0 }) },
+      paid_month: { period: month, ...(results[5]?.results[0] ?? { count: 0, total_cny_fen: 0 }) },
+      monthly_paid: await fetchMonthlyPaidSeries(c.env),
     },
   });
 });
@@ -714,6 +1041,91 @@ app.post('/api/users', async (c) => {
   ).bind(id, externalSubject, email, displayName).run();
   await appendAudit(c.env, auth.userId, 'create_user', 'user', id, { external_subject: externalSubject });
   return c.json({ user_id: id }, 201);
+});
+
+app.put('/api/users/:userId', async (c) => {
+  const auth = requireRoles(c, ['system_admin']);
+  if (isResponse(auth)) return auth;
+  const body = await jsonBody(c);
+  const userId = c.req.param('userId');
+  const existing = await c.env.DB.prepare(
+    `SELECT id, display_name, employment_status FROM users WHERE id = ?`,
+  ).bind(userId).first<{ id: string; display_name: string; employment_status: string }>();
+  if (!existing) return problem(c, 404, 'user_not_found', '用户不存在。');
+  const displayName = body.display_name === undefined ? existing.display_name : requiredString(body, 'display_name', 80);
+  const employmentStatus = body.employment_status === undefined
+    ? existing.employment_status
+    : enumValue(body, 'employment_status', ['active', 'inactive'] as const);
+  await c.env.DB.prepare(
+    `UPDATE users SET display_name = ?, employment_status = ?, updated_at = datetime('now') WHERE id = ?`,
+  ).bind(displayName, employmentStatus, userId).run();
+  await appendAudit(c.env, auth.userId, 'update_user', 'user', userId, { display_name: displayName, employment_status: employmentStatus });
+  return c.json({ user_id: userId });
+});
+
+app.get('/api/login-whitelist', async (c) => {
+  const auth = requireRoles(c, ['system_admin']);
+  if (isResponse(auth)) return auth;
+  const rows = await c.env.DB.prepare(
+    `SELECT whitelist.id, whitelist.kind, whitelist.value, whitelist.created_at,
+            creator.display_name AS created_by_name
+     FROM login_whitelist AS whitelist
+     LEFT JOIN users AS creator ON creator.id = whitelist.created_by
+     ORDER BY whitelist.kind, whitelist.value`,
+  ).all();
+  return c.json({ data: rows.results });
+});
+
+app.post('/api/login-whitelist', async (c) => {
+  const auth = requireRoles(c, ['system_admin']);
+  if (isResponse(auth)) return auth;
+  const body = await jsonBody(c);
+  const kind = enumValue(body, 'kind', ['email', 'domain'] as const);
+  const rawValue = requiredString(body, 'value', 255);
+  let value: string;
+  if (kind === 'email') {
+    const normalized = normalizeVerifiedEmail(rawValue);
+    if (!normalized) throw new ApiProblem(400, 'invalid_field', 'value 必须是合法邮箱地址。');
+    value = normalized;
+  } else {
+    value = rawValue.trim().toLowerCase().replace(/^@+/, '');
+    if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(value)) {
+      throw new ApiProblem(400, 'invalid_field', 'value 必须是合法域名（不含 @）。');
+    }
+  }
+  const id = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT OR IGNORE INTO login_whitelist (id, kind, value, created_by) VALUES (?, ?, ?, ?)`,
+    ).bind(id, kind, value, auth.userId),
+    c.env.DB.prepare(
+      `INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, detail_json)
+       VALUES (?, ?, 'add_login_whitelist_rule', 'login_whitelist', ?, ?)`,
+    ).bind(crypto.randomUUID(), auth.userId, id, JSON.stringify({ kind, value })),
+  ]);
+  return c.json({ rule_id: id }, 201);
+});
+
+app.delete('/api/login-whitelist/:ruleId', async (c) => {
+  const auth = requireRoles(c, ['system_admin']);
+  if (isResponse(auth)) return auth;
+  const ruleId = c.req.param('ruleId');
+  const existing = await c.env.DB.prepare(
+    `SELECT id FROM login_whitelist WHERE id = ?`,
+  ).bind(ruleId).first<{ id: string }>();
+  if (!existing) return problem(c, 404, 'whitelist_rule_not_found', '白名单规则不存在。');
+  const total = await c.env.DB.prepare(`SELECT COUNT(*) AS count FROM login_whitelist`).first<{ count: number }>();
+  if ((total?.count ?? 0) <= 1) {
+    return problem(c, 409, 'whitelist_last_entry', '白名单至少需要保留一条规则，否则会锁死所有登录。');
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare(`DELETE FROM login_whitelist WHERE id = ?`).bind(ruleId),
+    c.env.DB.prepare(
+      `INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, detail_json)
+       VALUES (?, ?, 'remove_login_whitelist_rule', 'login_whitelist', ?, '{}')`,
+    ).bind(crypto.randomUUID(), auth.userId, ruleId),
+  ]);
+  return c.json({ rule_id: ruleId, deleted: true });
 });
 
 app.put('/api/users/:userId/roles', async (c) => {
@@ -766,10 +1178,21 @@ app.post('/api/payers', async (c) => {
   if (isResponse(auth)) return auth;
   const body = await jsonBody(c);
   const id = crypto.randomUUID();
-  const displayName = requiredString(body, 'display_name', 120);
   const ownerUserId = optionalString(body, 'owner_user_id', 80);
+  let owner: { id: string; display_name: string } | null = null;
+  if (ownerUserId) {
+    owner = await c.env.DB.prepare(
+      `SELECT id, display_name FROM users WHERE id = ? AND employment_status = 'active'`,
+    ).bind(ownerUserId).first<{ id: string; display_name: string }>();
+    if (!owner) return problem(c, 404, 'user_not_found', '付款者必须是账号状态正常的员工。');
+  }
+  const displayName = body.display_name === undefined || body.display_name === ''
+    ? (owner ? owner.display_name : requiredString(body, 'display_name', 120))
+    : requiredString(body, 'display_name', 120);
   const paymentMethodMasked = optionalString(body, 'payment_method_masked', 120);
-  const activeFrom = isoDate(requiredString(body, 'active_from', 10), 'active_from');
+  const activeFrom = body.active_from === undefined || body.active_from === ''
+    ? shanghaiBusinessDate()
+    : isoDate(requiredString(body, 'active_from', 10), 'active_from');
   const activeUntil = optionalIsoDate(optionalString(body, 'active_until', 10), 'active_until');
   if (activeUntil && activeUntil < activeFrom) throw new ApiProblem(400, 'invalid_date_range', 'active_until 不能早于 active_from。');
   await c.env.DB.prepare(
@@ -780,78 +1203,82 @@ app.post('/api/payers', async (c) => {
   return c.json({ payer_id: id }, 201);
 });
 
-app.get('/api/reimbursement-accounts', async (c) => {
-  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer']);
-  if (isResponse(auth)) return auth;
-  const accounts = isGlobalReader(auth)
-    ? await c.env.DB.prepare(
-      `SELECT account.*, payer.display_name AS payer_name, user.display_name AS owner_name
-       FROM reimbursement_accounts AS account
-       JOIN payers AS payer ON payer.id = account.payer_id
-       LEFT JOIN users AS user ON user.id = account.owner_user_id
-       ORDER BY payer.display_name, account.platform`,
-    ).all()
-    : await c.env.DB.prepare(
-      `SELECT account.*, payer.display_name AS payer_name, user.display_name AS owner_name
-       FROM reimbursement_accounts AS account
-       JOIN payers AS payer ON payer.id = account.payer_id
-       LEFT JOIN users AS user ON user.id = account.owner_user_id
-       WHERE payer.owner_user_id = ? ORDER BY payer.display_name, account.platform`,
-    ).bind(auth.userId).all();
-  return c.json({ data: accounts.results });
-});
-
-app.post('/api/reimbursement-accounts', async (c) => {
-  const auth = requireRoles(c, DATA_ADMIN_ROLES);
-  if (isResponse(auth)) return auth;
-  const body = await jsonBody(c);
-  const id = crypto.randomUUID();
-  const payerId = requiredString(body, 'payer_id', 80);
-  const platform = requiredString(body, 'platform', 80);
-  const accountAlias = requiredString(body, 'account_alias', 120);
-  const accountMasked = optionalString(body, 'account_masked', 160);
-  const vaultRef = optionalString(body, 'vault_ref', 255);
-  const ownerUserId = optionalString(body, 'owner_user_id', 80);
-  const mfaStatus = enumValue(body, 'mfa_status', ['enabled', 'disabled', 'unknown'] as const);
-  await c.env.DB.prepare(
-    `INSERT INTO reimbursement_accounts (
-       id, payer_id, platform, account_alias, account_masked, vault_ref, owner_user_id, mfa_status
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(id, payerId, platform, accountAlias, accountMasked, vaultRef, ownerUserId, mfaStatus).run();
-  await appendAudit(c.env, auth.userId, 'create_reimbursement_account', 'reimbursement_account', id, { payer_id: payerId, platform });
-  return c.json({ reimbursement_account_id: id }, 201);
-});
-
 app.get('/api/subscriptions', async (c) => {
   const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer', 'employee']);
   if (isResponse(auth)) return auth;
   let sql = `SELECT DISTINCT
       subscription.id, subscription.name, subscription.status, subscription.owner_user_id,
       subscription.auto_renew, subscription.payment_method_masked, subscription.notes,
-      vendor.name AS vendor_name,
+      owner.display_name AS owner_name,
       term.id AS active_term_version_id, term.effective_start AS term_effective_start,
       term.effective_end AS term_effective_end, term.billing_cycle, term.settlement_mode,
       term.billing_anchor_date, term.original_currency, term.amount_minor,
       assignment.id AS active_payer_assignment_id, payer.id AS payer_id,
-      payer.display_name AS payer_name
+      payer.display_name AS payer_name, payer.owner_user_id AS payer_owner_user_id
     FROM subscriptions AS subscription
-    LEFT JOIN vendors AS vendor ON vendor.id = subscription.vendor_id
+    LEFT JOIN users AS owner ON owner.id = subscription.owner_user_id
     LEFT JOIN subscription_term_versions AS term
-      ON term.subscription_id = subscription.id AND term.effective_end IS NULL
+      ON term.subscription_id = subscription.id
+      AND term.effective_start <= date('now')
+      AND (term.effective_end IS NULL OR term.effective_end >= date('now'))
     LEFT JOIN payer_assignments AS assignment
       ON assignment.subscription_id = subscription.id AND assignment.effective_end IS NULL
     LEFT JOIN payers AS payer ON payer.id = assignment.payer_id`;
   let statement: D1PreparedStatement;
   if (isGlobalReader(auth)) {
     statement = c.env.DB.prepare(`${sql} ORDER BY subscription.name`);
-  } else if (auth.roles.includes('payer')) {
-    statement = c.env.DB.prepare(`${sql} WHERE payer.owner_user_id = ? ORDER BY subscription.name`).bind(auth.userId);
   } else {
-    statement = c.env.DB.prepare(`${sql} WHERE subscription.owner_user_id = ? ORDER BY subscription.name`).bind(auth.userId);
+    // 员工自助范围：归属自己使用的订阅，或付款者是自己的订阅。
+    statement = c.env.DB.prepare(`${sql} WHERE (subscription.owner_user_id = ? OR payer.owner_user_id = ?) ORDER BY subscription.name`).bind(auth.userId, auth.userId);
   }
   const subscriptions = await statement.all();
   return c.json({ data: subscriptions.results });
 });
+
+type SubscriptionTermInput = {
+  effectiveStart: string;
+  effectiveEnd: string | null;
+  billingCycle: 'monthly' | 'quarterly' | 'yearly' | 'one_time';
+  originalCurrency: string;
+  amountMinor: number;
+};
+
+/**
+ * 付款者从在职员工中解析：已有活跃付款者记录则复用，否则按员工姓名创建。
+ * 付款者不是独立维护的对象，只是员工在报销链路中的投影。
+ */
+async function findOrCreatePayerForUser(env: Env, userId: string): Promise<{ payerId: string } | null> {
+  const user = await env.DB.prepare(
+    `SELECT id, display_name FROM users WHERE id = ? AND employment_status = 'active'`,
+  ).bind(userId).first<{ id: string; display_name: string }>();
+  if (!user) return null;
+  const existing = await env.DB.prepare(
+    `SELECT id FROM payers WHERE owner_user_id = ? AND status = 'active' ORDER BY created_at LIMIT 1`,
+  ).bind(userId).first<{ id: string }>();
+  if (existing) return { payerId: existing.id };
+  const payerId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO payers (id, display_name, owner_user_id, active_from, status)
+     VALUES (?, ?, ?, ?, 'active')`,
+  ).bind(payerId, user.display_name, userId, shanghaiBusinessDate()).run();
+  return { payerId };
+}
+
+/** 价格、币种、周期、开始/截止日期的统一校验；创建与编辑共用，任何地方都不接受浮点金额。 */
+function parseTermInput(body: Record<string, unknown>): SubscriptionTermInput | null {
+  if (body.term === undefined || body.term === null) return null;
+  if (!isRecord(body.term)) throw new ApiProblem(400, 'invalid_field', 'term 必须是对象。');
+  const effectiveStart = isoDate(requiredString(body.term, 'effective_start', 10), 'term.effective_start');
+  const billingCycle = enumValue(body.term, 'billing_cycle', ['monthly', 'quarterly', 'yearly', 'one_time'] as const);
+  const originalCurrency = requiredString(body.term, 'original_currency', 12).toUpperCase();
+  if (!/^[A-Z]{3}$/.test(originalCurrency)) throw new ApiProblem(400, 'invalid_currency', 'term.original_currency 必须是三位 ISO 币种代码。');
+  const amountMinor = integer(body.term, 'amount_minor', 0);
+  const effectiveEnd = optionalIsoDate(optionalString(body.term, 'effective_end', 10), 'term.effective_end');
+  if (effectiveEnd && effectiveEnd < effectiveStart) {
+    throw new ApiProblem(400, 'invalid_date_range', 'term.effective_end 不能早于 effective_start。');
+  }
+  return { effectiveStart, effectiveEnd, billingCycle, originalCurrency, amountMinor };
+}
 
 app.post('/api/subscriptions', async (c) => {
   const auth = requireRoles(c, DATA_ADMIN_ROLES);
@@ -859,17 +1286,57 @@ app.post('/api/subscriptions', async (c) => {
   const body = await jsonBody(c);
   const id = crypto.randomUUID();
   const name = requiredString(body, 'name', 120);
-  const vendorId = optionalString(body, 'vendor_id', 80);
   const ownerUserId = optionalString(body, 'owner_user_id', 80);
   const autoRenew = booleanFlag(body, 'auto_renew');
   const paymentMethodMasked = optionalString(body, 'payment_method_masked', 120);
   const notes = optionalString(body, 'notes', 2_000);
-  await c.env.DB.prepare(
-    `INSERT INTO subscriptions (
-       id, name, vendor_id, owner_user_id, auto_renew, payment_method_masked, notes
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(id, name, vendorId, ownerUserId, autoRenew, paymentMethodMasked, notes).run();
+  const termInput = parseTermInput(body);
+  let payerId: string | null = null;
+  const payerUserId = optionalString(body, 'payer_user_id', 80);
+  const legacyPayerId = optionalString(body, 'payer_id', 80);
+  if (payerUserId) {
+    const resolved = await findOrCreatePayerForUser(c.env, payerUserId);
+    if (!resolved) return problem(c, 404, 'user_not_found', '付款者必须是在职员工。');
+    payerId = resolved.payerId;
+  } else if (legacyPayerId) {
+    const payer = await c.env.DB.prepare(`SELECT id FROM payers WHERE id = ?`).bind(legacyPayerId).first<{ id: string }>();
+    if (!payer) return problem(c, 404, 'payer_not_found', '付款者不存在。');
+    payerId = legacyPayerId;
+  }
+  if (payerId && !termInput) throw new ApiProblem(400, 'invalid_field', '关联付款者需要同时填写订阅开始日期等条款信息。');
+  const statements: D1PreparedStatement[] = [
+    c.env.DB.prepare(
+      `INSERT INTO subscriptions (
+         id, name, owner_user_id, auto_renew, payment_method_masked, notes
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(id, name, ownerUserId, autoRenew, paymentMethodMasked, notes),
+  ];
+  if (termInput) {
+    statements.push(c.env.DB.prepare(
+      `INSERT INTO subscription_term_versions (
+         id, subscription_id, effective_start, effective_end, billing_cycle,
+         settlement_mode, billing_anchor_date, original_currency, amount_minor
+       ) VALUES (?, ?, ?, ?, ?, 'actual_bill', ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      id,
+      termInput.effectiveStart,
+      termInput.effectiveEnd,
+      termInput.billingCycle,
+      termInput.effectiveStart,
+      termInput.originalCurrency,
+      termInput.amountMinor,
+    ));
+    if (payerId) {
+      statements.push(c.env.DB.prepare(
+        `INSERT INTO payer_assignments (id, subscription_id, payer_id, effective_start)
+         VALUES (?, ?, ?, ?)`,
+      ).bind(crypto.randomUUID(), id, payerId, termInput.effectiveStart));
+    }
+  }
+  await c.env.DB.batch(statements);
   await appendAudit(c.env, auth.userId, 'create_subscription', 'subscription', id, { name });
+  await regenerateCandidatesForSubscription(c.env, id, fetcher);
   return c.json({ subscription_id: id }, 201);
 });
 
@@ -892,14 +1359,167 @@ app.put('/api/subscriptions/:subscriptionId/operational', async (c) => {
     ? existing.payment_method_masked
     : optionalString(body, 'payment_method_masked', 120);
   const notes = body.notes === undefined ? existing.notes : optionalString(body, 'notes', 2_000);
-  await c.env.DB.prepare(
-    `UPDATE subscriptions
-     SET auto_renew = ?, payment_method_masked = ?, notes = ?, updated_at = datetime('now')
-     WHERE id = ?`,
-  ).bind(autoRenew, paymentMethodMasked, notes, subscriptionId).run();
-  await appendAudit(c.env, auth.userId, 'update_subscription_operational_fields', 'subscription', subscriptionId, { auto_renew: autoRenew });
-  return c.json({ subscription_id: subscriptionId, auto_renew: autoRenew });
+  let ownerUserId: string | null | undefined;
+  if (body.owner_user_id !== undefined) {
+    ownerUserId = optionalString(body, 'owner_user_id', 80);
+    if (ownerUserId !== null) {
+      const owner = await c.env.DB.prepare(`SELECT id FROM users WHERE id = ?`).bind(ownerUserId).first<{ id: string }>();
+      if (!owner) return problem(c, 404, 'user_not_found', '要关联的系统用户不存在。');
+    }
+  }
+
+  // 价格、币种、周期走条款版本：新条款生效时关闭当前条款；没有候选引用的
+  // 初始条款允许原地更正；订阅截止日期（空=持续续费）可直接在当前条款上调整；
+  // 任何情况下都不覆盖历史候选。
+  const termInput = parseTermInput(body);
+  const termEndProvided = body.term_effective_end !== undefined;
+  const termEnd = termEndProvided ? optionalIsoDate(optionalString(body, 'term_effective_end', 10), 'term_effective_end') : undefined;
+  let termChanged = false;
+  const termStatements: D1PreparedStatement[] = [];
+  // 付款者变更：关闭当前有效期，按生效日开启新付款者；显式传 null 表示解除付款者。
+  let payerChanged = false;
+  if (body.payer_user_id !== undefined) {
+    const payerUserId = optionalString(body, 'payer_user_id', 80);
+    const currentAssignment = await c.env.DB.prepare(
+      `SELECT id, payer_id, effective_start FROM payer_assignments
+       WHERE subscription_id = ? AND effective_end IS NULL
+       ORDER BY effective_start DESC LIMIT 1`,
+    ).bind(subscriptionId).first<{ id: string; payer_id: string; effective_start: string }>();
+    let targetPayerId: string | null = null;
+    if (payerUserId !== null) {
+      const resolved = await findOrCreatePayerForUser(c.env, payerUserId);
+      if (!resolved) return problem(c, 404, 'user_not_found', '付款者必须是在职员工。');
+      targetPayerId = resolved.payerId;
+    }
+    if ((currentAssignment?.payer_id ?? null) !== targetPayerId) {
+      const effectiveStart = isoDate(
+        optionalString(body, 'payer_effective_start', 10) ?? shanghaiBusinessDate(),
+        'payer_effective_start',
+      );
+      if (currentAssignment && targetPayerId !== null && effectiveStart <= currentAssignment.effective_start) {
+        return problem(c, 400, 'invalid_payer_start', '付款者生效日期必须晚于当前有效期的开始日期。');
+      }
+      payerChanged = true;
+      if (currentAssignment) {
+        // 正常交接：旧有效期止于新开始日前一天；清除尚未生效的付款者则以开始日封存。
+        const closeEnd = effectiveStart > currentAssignment.effective_start
+          ? addDaysIso(effectiveStart, -1)
+          : currentAssignment.effective_start;
+        termStatements.push(c.env.DB.prepare(
+          `UPDATE payer_assignments SET effective_end = ? WHERE id = ?`,
+        ).bind(closeEnd, currentAssignment.id));
+      }
+      if (targetPayerId) {
+        termStatements.push(c.env.DB.prepare(
+          `INSERT INTO payer_assignments (id, subscription_id, payer_id, effective_start)
+           VALUES (?, ?, ?, ?)`,
+        ).bind(crypto.randomUUID(), subscriptionId, targetPayerId, effectiveStart));
+      }
+    }
+  }
+  if (termInput || termEndProvided) {
+    const activeTerm = await c.env.DB.prepare(
+      `SELECT id, effective_start, effective_end, billing_cycle, settlement_mode, billing_anchor_date, original_currency, amount_minor
+       FROM subscription_term_versions WHERE subscription_id = ?
+       ORDER BY effective_start DESC LIMIT 1`,
+    ).bind(subscriptionId).first<{
+      id: string;
+      effective_start: string;
+      effective_end: string | null;
+      billing_cycle: string;
+      settlement_mode: string;
+      billing_anchor_date: string;
+      original_currency: string;
+      amount_minor: number;
+    }>();
+    if (!activeTerm && !termInput) {
+      return problem(c, 409, 'term_required', '该订阅还没有条款；请同时填写价格、币种、周期和生效开始日期。');
+    }
+    if (termEndProvided && termEnd && activeTerm && termEnd < activeTerm.effective_start) {
+      throw new ApiProblem(400, 'invalid_term_end', '订阅截止日期不能早于当前条款的生效开始日期。');
+    }
+    const fieldsSame = !termInput || (activeTerm
+      && activeTerm.effective_start === termInput.effectiveStart
+      && activeTerm.billing_cycle === termInput.billingCycle
+      && activeTerm.original_currency === termInput.originalCurrency
+      && activeTerm.amount_minor === termInput.amountMinor);
+    const endSame = !termEndProvided || (activeTerm && (activeTerm.effective_end ?? null) === (termEnd ?? null));
+    if (!fieldsSame || !endSame) {
+      termChanged = true;
+      const settlementMode = activeTerm?.settlement_mode ?? 'actual_bill';
+      if (!activeTerm) {
+        termStatements.push(c.env.DB.prepare(
+          `INSERT INTO subscription_term_versions
+             (id, subscription_id, effective_start, effective_end, billing_cycle, settlement_mode, billing_anchor_date, original_currency, amount_minor)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(crypto.randomUUID(), subscriptionId, termInput!.effectiveStart, termEnd ?? termInput!.effectiveEnd, termInput!.billingCycle, settlementMode, termInput!.effectiveStart, termInput!.originalCurrency, termInput!.amountMinor));
+      } else if (fieldsSame) {
+        termStatements.push(c.env.DB.prepare(
+          `UPDATE subscription_term_versions SET effective_end = ? WHERE id = ?`,
+        ).bind(termEnd ?? null, activeTerm.id));
+      } else if (termInput!.effectiveStart === activeTerm.effective_start) {
+        const candidateCount = await c.env.DB.prepare(
+          `SELECT COUNT(*) AS count FROM reimbursement_candidates WHERE subscription_term_version_id = ?`,
+        ).bind(activeTerm.id).first<{ count: number }>();
+        if ((candidateCount?.count ?? 0) > 0) {
+          return problem(c, 409, 'term_has_candidates', '该条款已产生报销候选，不能原地修改；请选择更晚的生效开始日期新建条款版本。');
+        }
+        termStatements.push(c.env.DB.prepare(
+          `UPDATE subscription_term_versions
+           SET billing_cycle = ?, original_currency = ?, amount_minor = ?, effective_end = ?
+           WHERE id = ?`,
+        ).bind(termInput!.billingCycle, termInput!.originalCurrency, termInput!.amountMinor, termEnd ?? activeTerm.effective_end, activeTerm.id));
+      } else if (termInput!.effectiveStart > activeTerm.effective_start) {
+        termStatements.push(
+          c.env.DB.prepare(
+            `UPDATE subscription_term_versions SET effective_end = ? WHERE id = ?`,
+          ).bind(addDaysIso(termInput!.effectiveStart, -1), activeTerm.id),
+          c.env.DB.prepare(
+            `INSERT INTO subscription_term_versions
+               (id, subscription_id, effective_start, effective_end, billing_cycle, settlement_mode, billing_anchor_date, original_currency, amount_minor)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(crypto.randomUUID(), subscriptionId, termInput!.effectiveStart, termEnd ?? termInput!.effectiveEnd, termInput!.billingCycle, settlementMode, termInput!.effectiveStart, termInput!.originalCurrency, termInput!.amountMinor),
+        );
+      } else {
+        return problem(c, 400, 'invalid_term_start', '新条款的生效开始日期不能早于当前条款。');
+      }
+    }
+  }
+
+  if (ownerUserId !== undefined) {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `UPDATE subscriptions
+         SET auto_renew = ?, payment_method_masked = ?, notes = ?, owner_user_id = ?, updated_at = datetime('now')
+         WHERE id = ?`,
+      ).bind(autoRenew, paymentMethodMasked, notes, ownerUserId, subscriptionId),
+      ...termStatements,
+    ]);
+  } else {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `UPDATE subscriptions
+         SET auto_renew = ?, payment_method_masked = ?, notes = ?, updated_at = datetime('now')
+         WHERE id = ?`,
+      ).bind(autoRenew, paymentMethodMasked, notes, subscriptionId),
+      ...termStatements,
+    ]);
+  }
+  await appendAudit(c.env, auth.userId, 'update_subscription_operational_fields', 'subscription', subscriptionId, {
+    auto_renew: autoRenew,
+    ...(ownerUserId !== undefined ? { owner_user_id: ownerUserId } : {}),
+    ...(termChanged ? { term_changed: true } : {}),
+    ...(payerChanged ? { payer_changed: true } : {}),
+  });
+  await regenerateCandidatesForSubscription(c.env, subscriptionId, fetcher);
+  return c.json({ subscription_id: subscriptionId, auto_renew: autoRenew, term_changed: termChanged, payer_changed: payerChanged });
 });
+
+function addDaysIso(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
 
 app.post('/api/subscriptions/:subscriptionId/term-versions', async (c) => {
   const auth = requireRoles(c, DATA_ADMIN_ROLES);
@@ -934,6 +1554,7 @@ app.post('/api/subscriptions/:subscriptionId/term-versions', async (c) => {
     subscription_id: c.req.param('subscriptionId'),
     effective_start: effectiveStart,
   });
+  await regenerateCandidatesForSubscription(c.env, c.req.param('subscriptionId'), fetcher);
   return c.json({ term_version_id: id }, 201);
 });
 
@@ -954,6 +1575,7 @@ app.post('/api/subscriptions/:subscriptionId/payer-assignments', async (c) => {
     subscription_id: c.req.param('subscriptionId'),
     payer_id: payerId,
   });
+  await regenerateCandidatesForSubscription(c.env, c.req.param('subscriptionId'), fetcher);
   return c.json({ payer_assignment_id: id }, 201);
 });
 
@@ -962,17 +1584,15 @@ app.get('/api/account-assets', async (c) => {
   if (isResponse(auth)) return auth;
   const accounts = isGlobalReader(auth)
     ? await c.env.DB.prepare(
-      `SELECT account.*, user.display_name AS owner_name, vendor.name AS vendor_name
+      `SELECT account.*, user.display_name AS owner_name
        FROM account_assets AS account
        LEFT JOIN users AS user ON user.id = account.owner_user_id
-       LEFT JOIN vendors AS vendor ON vendor.id = account.vendor_id
        ORDER BY account.display_name`,
     ).all()
     : await c.env.DB.prepare(
-      `SELECT account.*, user.display_name AS owner_name, vendor.name AS vendor_name
+      `SELECT account.*, user.display_name AS owner_name
        FROM account_assets AS account
        LEFT JOIN users AS user ON user.id = account.owner_user_id
-       LEFT JOIN vendors AS vendor ON vendor.id = account.vendor_id
        WHERE account.owner_user_id = ? ORDER BY account.display_name`,
     ).bind(auth.userId).all();
   return c.json({ data: accounts.results });
@@ -986,14 +1606,13 @@ app.post('/api/account-assets', async (c) => {
   const displayName = requiredString(body, 'display_name', 120);
   const accountIdentifierMasked = requiredString(body, 'account_identifier_masked', 160);
   const ownerUserId = optionalString(body, 'owner_user_id', 80);
-  const vendorId = optionalString(body, 'vendor_id', 80);
   const vaultRef = optionalString(body, 'vault_ref', 255);
   const expiresOn = optionalIsoDate(optionalString(body, 'expires_on', 10), 'expires_on');
   await c.env.DB.prepare(
     `INSERT INTO account_assets (
-       id, owner_user_id, vendor_id, account_identifier_masked, display_name, vault_ref, expires_on
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(id, ownerUserId, vendorId, accountIdentifierMasked, displayName, vaultRef, expiresOn).run();
+       id, owner_user_id, account_identifier_masked, display_name, vault_ref, expires_on
+     ) VALUES (?, ?, ?, ?, ?, ?)`,
+  ).bind(id, ownerUserId, accountIdentifierMasked, displayName, vaultRef, expiresOn).run();
   await appendAudit(c.env, auth.userId, 'create_account_asset', 'account_asset', id, { display_name: displayName });
   return c.json({ account_asset_id: id }, 201);
 });
@@ -1027,6 +1646,52 @@ app.post('/api/account-field-definitions', async (c) => {
   ).bind(id, fieldKey, label, fieldType, optionsJson).run();
   await appendAudit(c.env, auth.userId, 'create_account_field_definition', 'account_field_definition', id, { field_key: fieldKey });
   return c.json({ account_field_definition_id: id }, 201);
+});
+
+app.put('/api/account-assets/:accountId', async (c) => {
+  const auth = requireRoles(c, DATA_ADMIN_ROLES);
+  if (isResponse(auth)) return auth;
+  const body = await jsonBody(c);
+  const accountId = c.req.param('accountId');
+  const existing = await c.env.DB.prepare(
+    `SELECT id, owner_user_id, account_identifier_masked, display_name, vault_ref, status, expires_on
+     FROM account_assets WHERE id = ?`,
+  ).bind(accountId).first<{
+    id: string;
+    owner_user_id: string | null;
+    account_identifier_masked: string;
+    display_name: string;
+    vault_ref: string | null;
+    status: string;
+    expires_on: string | null;
+  }>();
+  if (!existing) return problem(c, 404, 'account_asset_not_found', '账号资产不存在。');
+  const displayName = body.display_name === undefined ? existing.display_name : requiredString(body, 'display_name', 120);
+  const accountIdentifier = body.account_identifier === undefined
+    ? existing.account_identifier_masked
+    : requiredString(body, 'account_identifier', 160);
+  let ownerUserId = existing.owner_user_id;
+  if (body.owner_user_id !== undefined) {
+    ownerUserId = optionalString(body, 'owner_user_id', 80);
+    if (ownerUserId !== null) {
+      const owner = await c.env.DB.prepare(`SELECT id FROM users WHERE id = ?`).bind(ownerUserId).first<{ id: string }>();
+      if (!owner) return problem(c, 404, 'user_not_found', '要关联的系统用户不存在。');
+    }
+  }
+  const vaultRef = body.vault_ref === undefined ? existing.vault_ref : optionalString(body, 'vault_ref', 255);
+  const expiresOn = body.expires_on === undefined
+    ? existing.expires_on
+    : optionalIsoDate(optionalString(body, 'expires_on', 10), 'expires_on');
+  const status = body.status === undefined
+    ? existing.status
+    : enumValue(body, 'status', ['active', 'inactive', 'retired'] as const);
+  await c.env.DB.prepare(
+    `UPDATE account_assets
+     SET display_name = ?, account_identifier_masked = ?, owner_user_id = ?, vault_ref = ?, expires_on = ?, status = ?
+     WHERE id = ?`,
+  ).bind(displayName, accountIdentifier, ownerUserId, vaultRef, expiresOn, status, accountId).run();
+  await appendAudit(c.env, auth.userId, 'update_account_asset', 'account_asset', accountId, { display_name: displayName, status });
+  return c.json({ account_asset_id: accountId });
 });
 
 app.put('/api/account-assets/:accountId/field-values', async (c) => {
@@ -1087,7 +1752,7 @@ function buildPlanOrProblem(cutoffDate: string, candidates: CandidateDbRow[]) {
 }
 
 app.get('/api/reimbursements/candidates', async (c) => {
-  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer']);
+  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer', 'employee']);
   if (isResponse(auth)) return auth;
   const requestedStatus = c.req.query('status') ?? 'pending';
   const allowedStatuses = ['pending', 'selected', 'batched', 'paid', 'void'];
@@ -1115,10 +1780,10 @@ app.get('/api/reimbursements/candidates', async (c) => {
 });
 
 app.post('/api/reimbursements/preview', async (c) => {
-  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'payer']);
+  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'payer', 'employee']);
   if (isResponse(auth)) return auth;
   const body = await jsonBody(c);
-  const cutoffDate = isoDate(requiredString(body, 'cutoff_date', 10), 'cutoff_date');
+  const cutoffDate = resolveCutoffDate(body);
   const candidateIds = selectedCandidateIds(body);
   const candidates = await pendingCandidatesForSelection(c.env, auth, candidateIds);
   const plan = buildPlanOrProblem(cutoffDate, candidates);
@@ -1137,17 +1802,43 @@ app.post('/api/reimbursements/preview', async (c) => {
   });
 });
 
+app.get('/api/reimbursements/reviewers', async (c) => {
+  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer', 'employee']);
+  if (isResponse(auth)) return auth;
+  const rows = await c.env.DB.prepare(
+    `SELECT DISTINCT user.id, user.display_name
+     FROM users AS user
+     JOIN user_roles AS assignment ON assignment.user_id = user.id
+     JOIN roles AS role ON role.id = assignment.role_id
+     WHERE user.employment_status = 'active' AND role.code IN ('system_admin', 'finance_reviewer')
+     ORDER BY user.display_name`,
+  ).all();
+  return c.json({ data: rows.results });
+});
+
 app.post('/api/reimbursements/create-batches', async (c) => {
-  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'payer']);
+  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'payer', 'employee']);
   if (isResponse(auth)) return auth;
   const body = await jsonBody(c);
-  const cutoffDate = isoDate(requiredString(body, 'cutoff_date', 10), 'cutoff_date');
+  const cutoffDate = resolveCutoffDate(body);
   const candidateIds = selectedCandidateIds(body);
   const idempotencyKey = c.req.header('Idempotency-Key');
   if (!idempotencyKey || idempotencyKey.length > 200) {
     return problem(c, 400, 'idempotency_key_required', '创建报销批次必须提供长度不超过 200 的 Idempotency-Key。');
   }
   const canonicalRequest = fingerprintBatchRequest({ cutoffDate, candidateIds });
+  // 提交报销必须指定审批人：具备财务审核权限的在职账号，后续审批/付款由其完成。
+  const reviewerUserId = requiredString(body, 'reviewer_user_id', 80);
+  const reviewer = await c.env.DB.prepare(
+    `SELECT user.id, user.display_name
+     FROM users AS user
+     JOIN user_roles AS assignment ON assignment.user_id = user.id
+     JOIN roles AS role ON role.id = assignment.role_id
+     WHERE user.id = ? AND user.employment_status = 'active'
+       AND role.code IN ('system_admin', 'finance_reviewer')
+     LIMIT 1`,
+  ).bind(reviewerUserId).first<{ id: string; display_name: string }>();
+  if (!reviewer) return problem(c, 400, 'invalid_reviewer', '审批人必须是具备财务审核权限的在职账号。');
   const requestHash = await sha256Hex(canonicalRequest);
   const action = 'create_reimbursement_batches';
   const existing = await c.env.DB.prepare(
@@ -1197,9 +1888,9 @@ app.post('/api/reimbursements/create-batches', async (c) => {
     const batchId = batchIds.get(batch.payerId)!;
     statements.push(c.env.DB.prepare(
       `INSERT INTO reimbursement_batches (
-         id, submission_id, payer_id, coverage_start, coverage_end, total_cny_fen, status
-       ) VALUES (?, ?, ?, ?, ?, ?, 'submitted')`,
-    ).bind(batchId, submissionId, batch.payerId, batch.coverageStart, batch.coverageEnd, batch.totalCnyFen));
+         id, submission_id, payer_id, reviewer_user_id, coverage_start, coverage_end, total_cny_fen, status
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted')`,
+    ).bind(batchId, submissionId, batch.payerId, reviewer.id, batch.coverageStart, batch.coverageEnd, batch.totalCnyFen));
     for (const candidate of batch.candidates) {
       statements.push(c.env.DB.prepare(
         `INSERT INTO reimbursement_items (
@@ -1227,11 +1918,22 @@ app.post('/api/reimbursements/create-batches', async (c) => {
       ).bind(candidate.id));
     }
   }
+  // 记录“提交人 → 报销人”拆账：admin 一次提交多人时，每个报销人的金额都写入审计。
+  const payerBreakdown = plan.batches.map((batch) => ({
+    payer_name: candidates.find((candidate) => candidate.payerId === batch.payerId)?.payer_display_name ?? batch.payerId,
+    total_cny_fen: batch.totalCnyFen,
+    candidate_count: batch.candidateIds.length,
+  }));
   statements.push(
     c.env.DB.prepare(
       `INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, detail_json)
        VALUES (?, ?, 'create_reimbursement_submission', 'reimbursement_submission', ?, ?)`,
-    ).bind(crypto.randomUUID(), auth.userId, submissionId, JSON.stringify({ batch_count: plan.batches.length, candidate_count: candidateIds.length })),
+    ).bind(crypto.randomUUID(), auth.userId, submissionId, JSON.stringify({
+      batch_count: plan.batches.length,
+      candidate_count: candidateIds.length,
+      reviewer: reviewer.display_name,
+      payers: payerBreakdown,
+    })),
     c.env.DB.prepare(
       `UPDATE idempotency_requests SET response_json = ?, completed_at = datetime('now')
        WHERE id = ?`,
@@ -1254,15 +1956,18 @@ app.post('/api/reimbursements/create-batches', async (c) => {
 });
 
 app.get('/api/reimbursements/batches', async (c) => {
-  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer']);
+  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer', 'employee']);
   if (isResponse(auth)) return auth;
   const baseSql = `SELECT batch.id, batch.submission_id, batch.payer_id, payer.display_name AS payer_name,
+      batch.reviewer_user_id, reviewer.display_name AS reviewer_name,
       batch.coverage_start, batch.coverage_end, batch.total_cny_fen, batch.status, batch.paid_at,
-      submission.cutoff_date, submission.created_at,
+      submission.cutoff_date, submission.created_at, actor.display_name AS actor_name,
       COUNT(item.id) AS item_count
     FROM reimbursement_batches AS batch
     JOIN reimbursement_submissions AS submission ON submission.id = batch.submission_id
     JOIN payers AS payer ON payer.id = batch.payer_id
+    LEFT JOIN users AS actor ON actor.id = submission.actor_id
+    LEFT JOIN users AS reviewer ON reviewer.id = batch.reviewer_user_id
     LEFT JOIN reimbursement_items AS item ON item.batch_id = batch.id
     `;
   const batches = isGlobalReader(auth)
@@ -1277,6 +1982,7 @@ app.post('/api/reimbursements/:batchId/approve', async (c) => {
   const batchId = c.req.param('batchId');
   const batch = await fetchBatchForScope(c.env, auth, batchId);
   if (!batch) return problem(c, 404, 'batch_not_found', '报销批次不存在。');
+  assertBatchReviewer(auth, batch);
   if (!['submitted', 'reviewing'].includes(batch.status)) return problem(c, 409, 'batch_not_approvable', '当前批次状态不能审核通过。');
   await c.env.DB.batch([
     c.env.DB.prepare(`UPDATE reimbursement_batches SET status = 'approved' WHERE id = ? AND status IN ('submitted', 'reviewing')`).bind(batchId),
@@ -1297,6 +2003,7 @@ app.post('/api/reimbursements/:batchId/mark-paid', async (c) => {
   const batchId = c.req.param('batchId');
   const batch = await fetchBatchForScope(c.env, auth, batchId);
   if (!batch) return problem(c, 404, 'batch_not_found', '报销批次不存在。');
+  assertBatchReviewer(auth, batch);
   if (batch.status !== 'approved') return problem(c, 409, 'batch_not_payable', '只有已审核通过的报销批次可以确认付款。');
   await c.env.DB.batch([
     c.env.DB.prepare(
@@ -1319,169 +2026,39 @@ app.post('/api/reimbursements/:batchId/mark-paid', async (c) => {
   return c.json({ batch_id: batchId, status: 'paid', paid_at: paidAt, watermarks: await deriveBatchWatermarks(c.env, batchId) });
 });
 
-type CandidateGenerationSource = {
-  term_version_id: string;
-  subscription_id: string;
-  billing_cycle: 'monthly' | 'quarterly' | 'yearly' | 'one_time';
-  settlement_mode: 'actual_bill' | 'accrual';
-  term_effective_start: string;
-  term_effective_end: string | null;
-  billing_anchor_date: string;
-  original_currency: string;
-  amount_minor: number;
-  payer_assignment_id: string;
-  payer_id: string;
-  payer_effective_start: string;
-  payer_effective_end: string | null;
-};
-
-function laterDate(left: string, right: string): string {
-  return left > right ? left : right;
+/** 订阅池变动后自动入池该订阅的候选；生成失败不阻断业务变更本身。 */
+async function regenerateCandidatesForSubscription(env: Env, subscriptionId: string, fetcher: typeof fetch): Promise<void> {
+  try {
+    await generateReimbursementCandidates(env, { cutoffDate: shanghaiBusinessDate(), fetcher, subscriptionId });
+  } catch {
+    // 生成失败留给每日 Cron 兜底，不能让订阅变更请求失败。
+  }
 }
 
-async function latestLockedFxRate(
-  env: Env,
-  currency: string,
-  cutoffDate: string,
-): Promise<{ fxQuoteId: string | null; rateNumerator: number; rateDenominator: number }> {
-  if (currency === 'CNY') return { fxQuoteId: null, rateNumerator: 1, rateDenominator: 1 };
-  const quote = await env.DB.prepare(
-    `SELECT id, rate_numerator, rate_denominator
-     FROM fx_quotes
-     WHERE base_currency = ? AND quote_currency = 'CNY'
-       AND status IN ('verified', 'manual') AND effective_at <= ?
-     ORDER BY effective_at DESC, fetched_at DESC
-     LIMIT 1`,
-  ).bind(currency, cutoffDate).first<{ id: string; rate_numerator: number; rate_denominator: number }>();
-  if (!quote) throw new ApiProblem(409, 'missing_fx_quote', `${currency} 在 ${cutoffDate} 前没有可锁定的 CNY 汇率快照。`);
-  return { fxQuoteId: quote.id, rateNumerator: quote.rate_numerator, rateDenominator: quote.rate_denominator };
-}
-
-async function paidWatermarkForAssignment(
-  env: Env,
-  source: CandidateGenerationSource,
-): Promise<string | null> {
-  const paid = await env.DB.prepare(
-    `SELECT item.coverage_start AS start, item.coverage_end AS end
-     FROM reimbursement_items AS item
-     JOIN reimbursement_candidates AS candidate ON candidate.id = item.candidate_id
-     WHERE candidate.subscription_term_version_id = ?
-       AND candidate.payer_assignment_id = ?
-       AND item.status = 'paid'
-     ORDER BY item.coverage_start`,
-  ).bind(source.term_version_id, source.payer_assignment_id).all<{ start: string; end: string }>();
-  return deriveContiguousPaidThrough({
-    startDate: laterDate(source.term_effective_start, source.payer_effective_start),
-    paidCoverages: paid.results,
-  });
-}
-
-/**
- * 根据版本化条款、付款者有效期和连续已付款水位生成候选。它只创建未存在的
- * 费用快照；实际报销选择仍由单独的 batch API 管理。
- */
 app.post('/api/reimbursements/generate-candidates', async (c) => {
-  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer']);
+  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'payer', 'employee']);
   if (isResponse(auth)) return auth;
   const body = await jsonBody(c);
-  const cutoffDate = isoDate(requiredString(body, 'cutoff_date', 10), 'cutoff_date');
+  const cutoffDate = resolveCutoffDate(body);
   const subscriptionId = optionalString(body, 'subscription_id', 80);
-  const sources = await c.env.DB.prepare(
-    `SELECT
-       term.id AS term_version_id, subscription.id AS subscription_id,
-       term.billing_cycle, term.settlement_mode,
-       term.effective_start AS term_effective_start, term.effective_end AS term_effective_end,
-       term.billing_anchor_date, term.original_currency, term.amount_minor,
-       assignment.id AS payer_assignment_id, assignment.payer_id,
-       assignment.effective_start AS payer_effective_start, assignment.effective_end AS payer_effective_end
-     FROM subscription_term_versions AS term
-     JOIN subscriptions AS subscription ON subscription.id = term.subscription_id
-     JOIN payer_assignments AS assignment ON assignment.subscription_id = subscription.id
-     WHERE subscription.status = 'active'
-       AND term.effective_start <= ?
-       AND (term.effective_end IS NULL OR term.effective_end >= ?)
-       AND assignment.effective_start <= ?
-       AND (assignment.effective_end IS NULL OR assignment.effective_end >= ?)
-       AND (? IS NULL OR subscription.id = ?)
-     ORDER BY subscription.id, term.effective_start, assignment.effective_start`,
-  ).bind(cutoffDate, cutoffDate, cutoffDate, cutoffDate, subscriptionId, subscriptionId).all<CandidateGenerationSource>();
-
-  const drafts: Array<{
-    termVersionId: string;
-    payerAssignmentId: string;
-    fxQuoteId: string | null;
-    coverageStart: string;
-    coverageEnd: string;
-    originalCurrency: string;
-    originalAmountMinor: number;
-    rateNumerator: number;
-    rateDenominator: number;
-    cnyAmountFen: number;
-  }> = [];
-  for (const source of sources.results) {
-    const fx = await latestLockedFxRate(c.env, source.original_currency, cutoffDate);
-    const lastReimbursedThrough = await paidWatermarkForAssignment(c.env, source);
-    const request = {
-      subscriptionId: source.subscription_id,
-      payerId: source.payer_id,
-      currency: source.original_currency,
-      amountMinor: source.amount_minor,
-      billingCycle: source.billing_cycle,
-      billingAnchorDate: source.billing_anchor_date,
-      subscriptionStartDate: source.term_effective_start,
-      ...(source.term_effective_end ? { subscriptionEndDate: source.term_effective_end } : {}),
-      payerActiveFrom: source.payer_effective_start,
-      ...(source.payer_effective_end ? { payerActiveUntil: source.payer_effective_end } : {}),
-      ...(lastReimbursedThrough ? { lastReimbursedThrough } : {}),
-      cutoffDate,
-      rate: { numerator: fx.rateNumerator, denominator: fx.rateDenominator },
-    };
-    const generated = source.settlement_mode === 'actual_bill'
-      ? buildActualBillCandidates(request)
-      : buildAccrualCandidates(request);
-    for (const candidate of generated) {
-      drafts.push({
-        termVersionId: source.term_version_id,
-        payerAssignmentId: source.payer_assignment_id,
-        fxQuoteId: fx.fxQuoteId,
-        coverageStart: candidate.coverageStart,
-        coverageEnd: candidate.coverageEnd,
-        originalCurrency: candidate.originalCurrency,
-        originalAmountMinor: candidate.originalAmountMinor,
-        rateNumerator: candidate.rateNumerator,
-        rateDenominator: candidate.rateDenominator,
-        cnyAmountFen: candidate.cnyAmountFen,
-      });
-    }
-  }
-  if (drafts.length === 0) return c.json({ generated: 0, source_count: sources.results.length, cutoff_date: cutoffDate });
-  const statements: D1PreparedStatement[] = drafts.map((candidate) => c.env.DB.prepare(
-    `INSERT INTO reimbursement_candidates (
-       id, subscription_term_version_id, payer_assignment_id,
-       coverage_start, coverage_end, original_currency, original_amount_minor,
-       fx_quote_id, rate_numerator, rate_denominator, cny_amount_fen, status
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-     ON CONFLICT DO NOTHING`,
-  ).bind(
-    crypto.randomUUID(),
-    candidate.termVersionId,
-    candidate.payerAssignmentId,
-    candidate.coverageStart,
-    candidate.coverageEnd,
-    candidate.originalCurrency,
-    candidate.originalAmountMinor,
-    candidate.fxQuoteId,
-    candidate.rateNumerator,
-    candidate.rateDenominator,
-    candidate.cnyAmountFen,
-  ));
-  statements.push(c.env.DB.prepare(
-    `INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, detail_json)
-     VALUES (?, ?, 'generate_reimbursement_candidates', 'candidate_generation', ?, ?)`,
-  ).bind(crypto.randomUUID(), auth.userId, cutoffDate, JSON.stringify({ source_count: sources.results.length, drafted_count: drafts.length })));
-  const results = await c.env.DB.batch(statements);
-  const inserted = results.slice(0, drafts.length).filter((result) => result.meta.changes === 1).length;
-  return c.json({ generated: inserted, skipped_existing: drafts.length - inserted, source_count: sources.results.length, cutoff_date: cutoffDate }, 201);
+  // 员工自助：只能为付款者是自己的订阅生成候选；财务与管理员可全量生成。
+  const employeePayerScoped = !hasAnyRole(auth, ['system_admin', 'asset_admin', 'finance_reviewer']);
+  const result = await generateReimbursementCandidates(c.env, {
+    cutoffDate,
+    fetcher,
+    subscriptionId,
+    payerOwnerUserId: employeePayerScoped ? auth.userId : null,
+  });
+  await appendAudit(c.env, auth.userId, 'generate_reimbursement_candidates', 'candidate_generation', cutoffDate, {
+    source_count: result.source_count,
+    drafted_count: result.drafted_count,
+  });
+  return c.json({
+    generated: result.generated,
+    skipped_existing: result.skipped_existing,
+    source_count: result.source_count,
+    cutoff_date: cutoffDate,
+  }, 201);
 });
 
 app.get('/api/fx-quotes', async (c) => {
@@ -1502,8 +2079,24 @@ app.post('/api/fx-quotes', async (c) => {
   const id = crypto.randomUUID();
   const baseCurrency = requiredString(body, 'base_currency', 3).toUpperCase();
   if (!/^[A-Z]{3}$/.test(baseCurrency)) throw new ApiProblem(400, 'invalid_currency', 'base_currency 必须是三位 ISO 币种代码。');
-  const rateNumerator = integer(body, 'rate_numerator', 1);
-  const rateDenominator = integer(body, 'rate_denominator', 1);
+  // 人工补录以“1 原币 = X 人民币”的十进制提交，服务端精确换算为最小单位有理数；
+  // 也兼容旧的分子/分母表单。任何路径都不让浮点进入存储。
+  const rateCnyPerUnit = optionalString(body, 'rate_cny_per_unit', 20);
+  let rateNumerator: number;
+  let rateDenominator: number;
+  if (rateCnyPerUnit !== null) {
+    let rational: { numerator: number; denominator: number };
+    try {
+      rational = rateToMinorUnitRational(rateCnyPerUnit, currencyMinorDigits(baseCurrency));
+    } catch {
+      throw new ApiProblem(400, 'invalid_rate', 'rate_cny_per_unit 必须是小数位数不超过 12 位的正十进制数。');
+    }
+    rateNumerator = rational.numerator;
+    rateDenominator = rational.denominator;
+  } else {
+    rateNumerator = integer(body, 'rate_numerator', 1);
+    rateDenominator = integer(body, 'rate_denominator', 1);
+  }
   if (baseCurrency === 'CNY' && (rateNumerator !== 1 || rateDenominator !== 1)) {
     throw new ApiProblem(400, 'invalid_cny_rate', 'CNY 汇率快照必须固定为 1 / 1。');
   }
@@ -1530,152 +2123,6 @@ app.post('/api/exchange-rates/sync', async (c) => {
     return c.json({ error: { code: result.errorCode, message: '汇率同步未执行或失败；系统没有填入猜测汇率。' }, sync_run_id: result.runId }, 501);
   }
   return c.json({ sync_run_id: result.runId, inserted: result.inserted });
-});
-
-app.get('/api/imports', async (c) => {
-  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor']);
-  if (isResponse(auth)) return auth;
-  const importResults = await c.env.DB.batch([
-    c.env.DB.prepare(
-      `SELECT run.id, run.mode, run.status, run.cursor, run.summary_json,
-              run.started_at, run.finished_at, connection.display_name AS connection_name,
-              schema_version.status AS schema_status
-       FROM source_import_runs AS run
-       JOIN source_connections AS connection ON connection.id = run.connection_id
-       LEFT JOIN source_schema_versions AS schema_version ON schema_version.id = run.schema_version_id
-       ORDER BY run.started_at DESC LIMIT 100`,
-    ),
-    c.env.DB.prepare(
-      `SELECT id, kind, status, started_at, finished_at, error_code, detail_json
-       FROM sync_runs ORDER BY started_at DESC LIMIT 100`,
-    ),
-  ]);
-  return c.json({
-    data: {
-      feishu_import_runs: importResults[0]?.results ?? [],
-      sync_runs: importResults[1]?.results ?? [],
-    },
-  });
-});
-
-/**
- * 读取真实 Base 元数据和记录数量，但不写回 Base，也不返回敏感 token 或原始
- * 记录内容。字段 ID 将作为后续映射审批的唯一锚点。
- */
-app.post('/api/imports/feishu/preview', async (c) => {
-  const auth = requireRoles(c, DATA_ADMIN_ROLES);
-  if (isResponse(auth)) return auth;
-  const config = feishuSourceConfigFromEnv(c.env);
-  if (!isFeishuImportConfigured(config)) {
-    return problem(c, 503, 'feishu_import_not_configured', '飞书只读应用尚未配置或导入开关未开启。');
-  }
-  const connectionId = 'source-feishu-base-primary';
-  const importRunId = crypto.randomUUID();
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `INSERT OR IGNORE INTO source_connections (id, source_system, display_name, import_enabled)
-       VALUES (?, 'feishu_base', '兰芯云朵资产管理（只读）', 1)`,
-    ).bind(connectionId),
-    c.env.DB.prepare(
-      `INSERT INTO source_import_runs (id, connection_id, mode, status)
-       VALUES (?, ?, 'preview', 'running')`,
-    ).bind(importRunId, connectionId),
-  ]);
-  try {
-    const requestedTables = [c.env.FEISHU_PERSON_TABLE_ID, c.env.FEISHU_SUBSCRIPTION_TABLE_ID]
-      .filter((tableId): tableId is string => Boolean(tableId));
-    const discovery = await new FeishuBaseReader(config).discover(requestedTables);
-    const sourceMetadata: FeishuTableMetadata[] = discovery.map((entry) => ({
-      tableId: entry.table.tableId,
-      name: entry.table.name,
-      fields: entry.fields.map((field) => ({ fieldId: field.fieldId, name: field.name })),
-    }));
-    const mappingProposal = proposeFeishuFieldMapping(sourceMetadata);
-    const schema = {
-      source: 'feishu_base',
-      tables: discovery.map((entry) => ({
-        table_id: entry.table.tableId,
-        table_name: entry.table.name,
-        record_count: entry.recordCount,
-        fields: entry.fields.map((field) => ({ field_id: field.fieldId, name: field.name, type: field.type })),
-      })),
-      mapping_proposal: mappingProposal,
-    };
-    const schemaHash = await sha256Hex(JSON.stringify(schema));
-    const existing = await c.env.DB.prepare(
-      `SELECT id, status FROM source_schema_versions WHERE connection_id = ? AND schema_hash = ?`,
-    ).bind(connectionId, schemaHash).first<{ id: string; status: 'approved' | 'schema_drift' | 'retired' }>();
-    const schemaVersionId = existing?.id ?? crypto.randomUUID();
-    const schemaStatus = existing?.status ?? 'schema_drift';
-    if (!existing) {
-      await c.env.DB.prepare(
-        `INSERT INTO source_schema_versions (id, connection_id, schema_hash, mapping_json, status)
-         VALUES (?, ?, ?, ?, 'schema_drift')`,
-      ).bind(schemaVersionId, connectionId, schemaHash, JSON.stringify(schema)).run();
-    }
-    const runStatus = schemaStatus === 'approved' ? 'success' : 'schema_drift';
-    await c.env.DB.prepare(
-      `UPDATE source_import_runs
-       SET schema_version_id = ?, status = ?, summary_json = ?, finished_at = datetime('now')
-       WHERE id = ?`,
-    ).bind(schemaVersionId, runStatus, JSON.stringify({ table_count: discovery.length, schema_hash: schemaHash }), importRunId).run();
-    await appendAudit(c.env, auth.userId, 'preview_feishu_source', 'source_import_run', importRunId, { table_count: discovery.length, schema_status: schemaStatus });
-    return c.json({
-      data: {
-        import_run_id: importRunId,
-        schema_version_id: schemaVersionId,
-        schema_status: schemaStatus,
-        requires_mapping_approval: schemaStatus !== 'approved',
-        mapping_proposal: mappingProposal,
-        tables: schema.tables,
-      },
-    });
-  } catch {
-    await c.env.DB.prepare(
-      `UPDATE source_import_runs
-       SET status = 'failed', finished_at = datetime('now'), summary_json = '{"message":"read-only source preview failed"}'
-       WHERE id = ?`,
-    ).bind(importRunId).run();
-    return problem(c, 502, 'feishu_preview_failed', '无法读取飞书只读来源；请检查应用权限、Base 共享范围和字段配置。');
-  }
-});
-
-app.post('/api/imports/feishu/schema-versions/:schemaVersionId/approve', async (c) => {
-  const auth = requireRoles(c, ['system_admin']);
-  if (isResponse(auth)) return auth;
-  const schemaVersionId = c.req.param('schemaVersionId');
-  const schemaVersion = await c.env.DB.prepare(
-    `SELECT id, status, mapping_json FROM source_schema_versions WHERE id = ?`,
-  ).bind(schemaVersionId).first<{ id: string; status: string; mapping_json: string }>();
-  if (!schemaVersion) return problem(c, 404, 'schema_version_not_found', '来源结构版本不存在。');
-  if (schemaVersion.status === 'approved') return c.json({ schema_version_id: schemaVersionId, status: 'approved' });
-  let proposal: unknown;
-  try {
-    const stored = JSON.parse(schemaVersion.mapping_json) as { mapping_proposal?: unknown };
-    proposal = stored.mapping_proposal;
-  } catch {
-    return problem(c, 409, 'mapping_document_invalid', '来源映射文档损坏，不能审批。');
-  }
-  if (!isRecord(proposal) || proposal.status !== 'pending_approval' || !isRecord(proposal.diagnostics) || proposal.diagnostics.readiness !== 'ready') {
-    return problem(c, 409, 'mapping_not_ready', '字段 ID 映射仍有缺失或歧义，不能审批。');
-  }
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `UPDATE source_schema_versions SET status = 'approved' WHERE id = ? AND status = 'schema_drift'`,
-    ).bind(schemaVersionId),
-    c.env.DB.prepare(
-      `INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, detail_json)
-       VALUES (?, ?, 'approve_feishu_field_mapping', 'source_schema_version', ?, '{}')`,
-    ).bind(crypto.randomUUID(), auth.userId, schemaVersionId),
-  ]);
-  return c.json({ schema_version_id: schemaVersionId, status: 'approved' });
-});
-
-app.post('/api/imports/feishu/apply', async (c) => {
-  const auth = requireRoles(c, ['system_admin']);
-  if (isResponse(auth)) return auth;
-  // 明确禁止依据中文列名猜测映射。只有字段 ID 映射被管理员审批后，才应开放 apply。
-  return problem(c, 409, 'mapping_approval_required', '当前只开放只读预览。请先确认并审批字段 ID 映射，再启用正式导入。');
 });
 
 app.get('/api/audit-events', async (c) => {
@@ -1780,16 +2227,7 @@ function renderUiRoute(
   page: UiPage,
   options: { status?: 200 | 404; trustedBody?: string } = {},
 ): Response {
-  const entry = c.get('entry');
   const principal = c.get('principal');
-  if (entry?.kind === 'external') {
-    if (!c.get('signedIdentity')) return c.html(renderExternalAccessRequiredUi(), 401);
-    if (page === 'profile') return c.redirect('https://ie-oa.lancloudtech.com/profile', 302);
-    if (!principal) return c.html(renderExternalIdentityUi());
-  } else if (entry?.kind === 'corporate' && !principal) {
-    return c.html(renderCorporateAccessRequiredUi(), 401);
-  }
-
   if (!principal) return c.html(renderCorporateAccessRequiredUi(), 401);
   return c.html(renderAdminUi({
     page,
@@ -1800,7 +2238,7 @@ function renderUiRoute(
 
 app.get('/', (c) => renderUiRoute(c, 'dashboard'));
 
-for (const route of ['/subscriptions', '/accounts', '/reimbursements', '/rates', '/people', '/imports', '/profile']) {
+for (const route of ['/subscriptions', '/accounts', '/reimbursements', '/finance', '/rates', '/people', '/profile']) {
   app.get(route, (c) => renderUiRoute(c, uiPageFromPath(new URL(c.req.url).pathname)));
 }
 
@@ -1820,6 +2258,6 @@ const app = createApp();
 export default {
   fetch: app.fetch,
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(syncConfiguredFxRates(env));
+    ctx.waitUntil(Promise.all([syncConfiguredFxRates(env), scheduledCandidateGeneration(env)]));
   },
 } satisfies ExportedHandler<Env>;

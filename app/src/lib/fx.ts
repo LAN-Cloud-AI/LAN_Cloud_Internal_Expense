@@ -73,20 +73,27 @@ export function extractCnyRate(payload: unknown): string | number {
 /**
  * Fetches a quote through an explicit adapter contract. The configured endpoint
  * must accept `base=<currency>&symbols=CNY` and return one supported envelope.
- * This function never sends application secrets in URLs or returns them.
+ * `date`（YYYY-MM-DD）把端点最后一段替换为该日期以读取历史汇率（如 frankfurter
+ * 的 /v1/2026-05-20）。This function never sends application secrets in URLs or returns them.
  */
 export async function fetchCnyRate({
   baseCurrency,
   providerUrl,
   apiKey,
+  date,
   fetcher = fetch,
 }: {
   baseCurrency: string;
   providerUrl: string;
   apiKey?: string;
+  date?: string;
   fetcher?: typeof fetch;
 }): Promise<FetchedFxRate> {
   const url = new URL(providerUrl);
+  if (date !== undefined) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('FX rate date must be YYYY-MM-DD');
+    url.pathname = url.pathname.replace(/\/[^/]*$/, `/${date}`);
+  }
   url.searchParams.set('base', baseCurrency);
   url.searchParams.set('symbols', 'CNY');
   const response = await fetcher(url.toString(), {

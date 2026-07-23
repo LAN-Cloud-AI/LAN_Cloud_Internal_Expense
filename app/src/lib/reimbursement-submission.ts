@@ -85,8 +85,10 @@ export function buildSubmissionPlan({
   assertIsoDate(cutoffDate, 'cutoff_date');
   const candidateIds = normalizeCandidateIds(candidates.map((candidate) => candidate.id));
   for (const candidate of candidates) {
-    if (candidate.coverageEnd > cutoffDate) {
-      throw new Error(`candidate ${candidate.id} is after cutoff_date`);
+    // 按周期结费：覆盖开始日不超过截止日即代表账单已真实产生，全额可报；
+    // 只有覆盖开始日晚于截止日（尚无真实付款）才不允许提交。
+    if (candidate.coverageStart > cutoffDate) {
+      throw new Error(`candidate ${candidate.id} starts after cutoff_date`);
     }
     if (
       !Number.isSafeInteger(candidate.rateNumerator) ||

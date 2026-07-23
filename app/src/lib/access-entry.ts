@@ -1,6 +1,6 @@
 import type { Env } from './types';
 
-export type AccessEntryKind = 'corporate' | 'external' | 'legacy';
+export type AccessEntryKind = 'corporate' | 'legacy';
 
 export interface AccessEntry {
   kind: AccessEntryKind;
@@ -10,7 +10,6 @@ export interface AccessEntry {
 }
 
 const CORPORATE_HOSTNAME = 'ie-oa.lancloudtech.com';
-const EXTERNAL_HOSTNAME = 'external-ie-oa.lancloudtech.com';
 const LEGACY_HOSTNAME = 'ie_oa.lancloudtech.com';
 
 function hostnameWithoutPort(host: string): string {
@@ -25,14 +24,6 @@ export function accessEntryForRequest(host: string, env: Env): AccessEntry | nul
       hostname: CORPORATE_HOSTNAME,
       audience: env.ACCESS_AUD_CORPORATE,
       origin: `https://${CORPORATE_HOSTNAME}`,
-    };
-  }
-  if (hostname === EXTERNAL_HOSTNAME && env.ACCESS_AUD_EXTERNAL) {
-    return {
-      kind: 'external',
-      hostname: EXTERNAL_HOSTNAME,
-      audience: env.ACCESS_AUD_EXTERNAL,
-      origin: `https://${EXTERNAL_HOSTNAME}`,
     };
   }
   if (hostname === LEGACY_HOSTNAME && env.ACCESS_AUD_CORPORATE) {
@@ -51,6 +42,14 @@ export function isCorporateEmail(email: string | undefined): string | null {
   const normalized = email.trim().toLowerCase();
   const [localPart, domain, ...extra] = normalized.split('@');
   return localPart && domain === 'lancloudtech.com' && extra.length === 0 ? normalized : null;
+}
+
+/** 规范化任何域的已验证邮箱；不合法（缺段、多 @）返回 null。 */
+export function normalizeVerifiedEmail(email: string | undefined): string | null {
+  if (!email) return null;
+  const normalized = email.trim().toLowerCase();
+  const [localPart, domain, ...extra] = normalized.split('@');
+  return localPart && domain && domain.includes('.') && extra.length === 0 ? normalized : null;
 }
 
 export function isAllowedEntryOrigin(origin: string | undefined, entry: AccessEntry): boolean {

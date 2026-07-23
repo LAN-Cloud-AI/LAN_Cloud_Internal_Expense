@@ -240,8 +240,12 @@ export function buildAccrualCandidates(
 }
 
 /**
- * 计算实际账单候选：只为截止日前已到达账期起点的整期应付账单建候选。
- * 这不是按天预测；实际扣款凭证录入后可覆盖此预估候选，但不会改写历史快照。
+ * 计算实际账单候选：只为截止日前已到达账期起点的应付账单建候选——账期一旦
+ * 开始即代表真实付款已产生，整期金额全额可报；账期开始日晚于截止日（尚无
+ * 真实付款）一律不生成。首期或续报首期不足整期时（订阅开始日晚于账期起点、
+ * 或上次报销水位落在账期中段），该期未报部分按天折算，保证覆盖从订阅开始
+ * 连续延伸到报销节点，不丢天数、不重复。这不是按天预测；实际扣款凭证录入后
+ * 可覆盖此预估候选，但不会改写历史快照。
  */
 export function buildActualBillCandidates(
   request: AccrualCandidateRequest,
@@ -269,13 +273,37 @@ export function buildActualBillCandidates(
 
   let index = 0;
   let bounds = cycleBounds(billingAnchorDate, billingCycle, index);
-  while (compareDate(bounds.cycleStart, reimbursableStart) < 0) {
+  while (compareDate(bounds.cycleEnd, reimbursableStart) < 0) {
     index += 1;
     if (index > 2_400) throw new Error('billing anchor is unreasonably old');
     bounds = cycleBounds(billingAnchorDate, billingCycle, index);
   }
 
   const candidates: AccrualCandidateDraft[] = [];
+  // 不足整期的首期/续报首期：该期账单已产生，按天折算未报剩余部分。
+  if (compareDate(bounds.cycleStart, reimbursableStart) < 0) {
+    const coverageEnd = minDate(bounds.cycleEnd, reimbursableEnd);
+    const proratedAmountMinor = Math.round(
+      (request.amountMinor * daysInclusive(reimbursableStart, coverageEnd)) /
+        daysInclusive(bounds.cycleStart, bounds.cycleEnd),
+    );
+    candidates.push({
+      idempotencyKey: `${request.subscriptionId}:${request.payerId}:${reimbursableStart}:${coverageEnd}:actual_bill`,
+      subscriptionId: request.subscriptionId,
+      payerId: request.payerId,
+      coverageStart: reimbursableStart,
+      coverageEnd,
+      originalCurrency: request.currency,
+      originalAmountMinor: proratedAmountMinor,
+      rateNumerator: request.rate.numerator,
+      rateDenominator: request.rate.denominator,
+      cnyAmountFen: calculateCnyFen(proratedAmountMinor, request.rate),
+    });
+    index += 1;
+    bounds = cycleBounds(billingAnchorDate, billingCycle, index);
+  }
+
+  // 账期开始即代表真实付款：全额入账；账期开始日晚于截止日的周期不进入循环。
   while (compareDate(bounds.cycleStart, reimbursableEnd) <= 0) {
     candidates.push({
       idempotencyKey: `${request.subscriptionId}:${request.payerId}:${bounds.cycleStart}:${bounds.cycleEnd}:actual_bill`,
