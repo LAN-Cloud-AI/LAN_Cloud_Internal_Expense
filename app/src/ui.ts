@@ -711,23 +711,23 @@ function clientScript(canManageAccounts: boolean): string {
       const optionSources = {
         users: { url: () => api.users, value: 'id', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
         'active-users': { url: () => api.users, value: 'id', filter: (row) => row.employment_status === 'active', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
-        'account-owners': { url: () => api.accountOwners, value: 'id', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
+        ${canManageAccounts ? "'account-owners': { url: () => api.accountOwners, value: 'id', label: (row) => String(row.display_name || '') }," : ''}
         reviewers: { url: () => api.reimbursementReviewers, value: 'id', label: (row) => String(row.display_name || '') },
         roles: { url: () => api.roles, value: 'code', label: (row) => String(row.display_name || '') + ' · ' + String(row.code || '') }
       };
-      const applyPendingSelectValue = (select) => {
+      ${canManageAccounts ? `const applyPendingSelectValue = (select) => {
         if (select.dataset.pendingValue === undefined) return;
         const pendingValue = select.dataset.pendingValue;
         const isAvailable = Array.from(select.options).some((option) => option.value === pendingValue);
         select.dataset.ownerSelectionReady = isAvailable ? 'true' : 'false';
         if (isAvailable) select.value = pendingValue;
-      };
+      };` : ''}
       const loadOptionSelects = async () => {
         const selects = Array.from(document.querySelectorAll('select[data-options-from]'));
         await Promise.all(selects.map(async (select) => {
           const source = optionSources[select.dataset.optionsFrom];
           if (!source || !source.url()) return;
-          select.dataset.optionsLoaded = 'false';
+          ${canManageAccounts ? "select.dataset.optionsLoaded = 'false';" : ''}
           try {
             const payload = await jsonRequest(source.url());
             const rows = recordsFrom(payload).filter(source.filter || (() => true));
@@ -739,11 +739,11 @@ function clientScript(canManageAccounts: boolean): string {
               options.push('<option value="' + escapeHtml(value) + '">' + escapeHtml(source.label(row)) + '</option>');
             });
             select.innerHTML = options.join('') || '<option value="">暂无可选项</option>';
-            select.dataset.optionsLoaded = 'true';
-            applyPendingSelectValue(select);
+            ${canManageAccounts ? `select.dataset.optionsLoaded = 'true';
+            applyPendingSelectValue(select);` : ''}
           } catch (_) {
-            select.dataset.optionsLoaded = 'false';
-            select.dataset.ownerSelectionReady = 'false';
+            ${canManageAccounts ? `select.dataset.optionsLoaded = 'false';
+            select.dataset.ownerSelectionReady = 'false';` : ''}
             select.innerHTML = '<option value="">列表载入失败</option>';
           }
         }));

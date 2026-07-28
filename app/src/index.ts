@@ -1010,10 +1010,10 @@ app.get('/api/account-owners', async (c) => {
   const auth = requireRoles(c, DATA_ADMIN_ROLES);
   if (isResponse(auth)) return auth;
   const owners = await c.env.DB.prepare(
-    `SELECT user.id, user.display_name, user.email
+    `SELECT user.id, user.display_name
      FROM users AS user
      ORDER BY user.display_name, user.id`,
-  ).all<{ id: string; display_name: string; email: string | null }>();
+  ).all<{ id: string; display_name: string }>();
   return c.json({ data: owners.results });
 });
 

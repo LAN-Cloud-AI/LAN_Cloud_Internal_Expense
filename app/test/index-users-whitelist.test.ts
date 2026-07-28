@@ -180,10 +180,10 @@ describe('account asset editing', () => {
     expect(owners.status).toBe(200);
     const ownerRows = (await owners.json() as { data: Array<Record<string, unknown>> }).data;
     expect(ownerRows.slice(0, 2)).toEqual([
-      { id: 'owner-alpha', display_name: 'Alpha Owner', email: 'alpha@example.test' },
-      { id: 'owner-omega', display_name: 'Omega Owner', email: 'omega@example.test' },
+      { id: 'owner-alpha', display_name: 'Alpha Owner' },
+      { id: 'owner-omega', display_name: 'Omega Owner' },
     ]);
-    expect(ownerRows.every((row) => Object.keys(row).sort().join(',') === 'display_name,email,id')).toBe(true);
+    expect(ownerRows.every((row) => Object.keys(row).sort().join(',') === 'display_name,id')).toBe(true);
 
     const users = await request(app, env, '/api/users', 'admin');
     expect(users.status).toBe(403);

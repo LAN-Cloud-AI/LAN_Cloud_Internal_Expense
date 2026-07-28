@@ -261,7 +261,7 @@ describe('identity settings and external binding UI', () => {
     expect(accounts).not.toContain('name="vendor_id"');
   });
 
-  it('uses the narrow owner-options contract and keeps unresolved account ownership out of updates', () => {
+  it('uses display-name-only owner options and keeps unresolved account ownership out of updates', () => {
     expect(ui.UI_API_CONTRACT.accountOwners).toBe('/api/account-owners');
     const accounts = ui.renderAdminUi({
       page: 'accounts',
@@ -270,16 +270,29 @@ describe('identity settings and external binding UI', () => {
 
     expect(accounts).toContain('data-options-from="account-owners"');
     expect(accounts).not.toContain('data-options-from="users"');
-    expect(accounts).toContain("'account-owners': { url: () => api.accountOwners");
+    expect(accounts).toContain("'account-owners': { url: () => api.accountOwners, value: 'id', label: (row) => String(row.display_name || '') }");
     expect(accounts).toContain("ownerSelect.dataset.ownerSelectionReady === 'true'");
     expect(accounts).toContain('...(includeOwner ? { owner_user_id: values.owner_user_id || null } : {})');
+  });
 
+  it('omits account-owner management script identifiers from every read-only account page', () => {
     for (const principal of [
       { displayName: 'auditor@example.test', roles: ['auditor'] },
       { displayName: 'employee@example.test', roles: ['employee'] },
+      { displayName: 'reviewer@example.test', roles: ['finance_reviewer'] },
+      { displayName: 'payer@example.test', roles: ['payer'] },
+      { displayName: 'unassigned@example.test', roles: [] },
     ]) {
       const readOnly = ui.renderAdminUi({ page: 'accounts', principal });
-      expect(readOnly).not.toContain('/api/account-owners');
+      for (const managementIdentifier of [
+        '/api/account-owners',
+        'account-owners',
+        'api.accountOwners',
+        'applyPendingSelectValue',
+        'optionsLoaded',
+        'pendingValue',
+        'ownerSelectionReady',
+      ]) expect(readOnly).not.toContain(managementIdentifier);
     }
   });
 
