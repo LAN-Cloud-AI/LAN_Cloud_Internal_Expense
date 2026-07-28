@@ -60,6 +60,8 @@ export const UI_API_CONTRACT = {
   auditEvents: '/api/audit-events',
 } as const;
 
+const { accountOperational: _accountOperational, ...READ_ONLY_ACCOUNT_UI_API_CONTRACT } = UI_API_CONTRACT;
+
 const EMPLOYEE_UI_API_CONTRACT = {
   dashboard: UI_API_CONTRACT.dashboard,
   subscriptions: UI_API_CONTRACT.subscriptions,
@@ -136,6 +138,7 @@ const PAGE_META: Record<UiPage, { title: string; eyebrow: string; description: s
 const EMPLOYEE_PAGES: UiPage[] = ['dashboard', 'subscriptions', 'accounts', 'reimbursements', 'profile'];
 
 const FINANCE_VIEW_ROLES = ['system_admin', 'finance_reviewer', 'auditor'];
+const ACCOUNT_MANAGER_ROLES = ['system_admin', 'asset_admin'];
 
 function canViewFinance(principal: UiPrincipal | null | undefined): boolean {
   const roles = principal?.roles ?? [];
@@ -145,6 +148,11 @@ function canViewFinance(principal: UiPrincipal | null | undefined): boolean {
 function isEmployeeOnly(principal: UiPrincipal | null | undefined): boolean {
   const roles = principal?.roles ?? [];
   return roles.includes('employee') && roles.every((role) => role === 'employee');
+}
+
+function canManageAccountAssets(principal: UiPrincipal | null | undefined): boolean {
+  const roles = principal?.roles ?? [];
+  return roles.some((role) => ACCOUNT_MANAGER_ROLES.includes(role));
 }
 
 function escapeHtml(value: string): string {
@@ -322,10 +330,10 @@ function subscriptionsPage(employeeOnly = false): string {
   </section>`;
 }
 
-function accountsPage(employeeOnly = false): string {
-  if (employeeOnly) {
+function accountsPage(canManageAccounts = false, employeeOnly = false): string {
+  if (!canManageAccounts) {
     return `<section class="surface">
-      ${sectionHeading('账号资产清单', '仅显示归属自己的账号资产。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+      ${sectionHeading('账号资产清单', employeeOnly ? '仅显示归属自己的账号资产。' : '只读查看账号资产。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
       ${emptyCollection('accounts', '账号资产')}
     </section>`;
   }
@@ -516,12 +524,12 @@ function profilePage(): string {
   </section>`;
 }
 
-function pageContent(page: UiPage, employeeOnly: boolean): string {
+function pageContent(page: UiPage, employeeOnly: boolean, canManageAccounts: boolean): string {
   switch (page) {
     case 'subscriptions':
       return subscriptionsPage(employeeOnly);
     case 'accounts':
-      return accountsPage(employeeOnly);
+      return accountsPage(canManageAccounts, employeeOnly);
     case 'reimbursements':
       return reimbursementsPage();
     case 'finance':
@@ -547,6 +555,7 @@ export function uiPageFromPath(pathname: string): UiPage {
  */
 export function renderAdminUi(options: UiShellOptions = {}): string {
   const employeeOnly = isEmployeeOnly(options.principal);
+  const canManageAccounts = canManageAccountAssets(options.principal);
   const requestedPage = options.page ?? 'dashboard';
   const financeDenied = requestedPage === 'finance' && !canViewFinance(options.principal);
   const page = (employeeOnly && !EMPLOYEE_PAGES.includes(requestedPage)) || financeDenied ? 'dashboard' : requestedPage;
@@ -565,8 +574,11 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
       <span class="nav-icon" aria-hidden="true">${item.icon}</span><span><strong>${item.label}</strong><small>${item.description}</small></span>
     </a>`;
   }).join('');
-  const body = options.trustedBody ?? pageContent(page, employeeOnly);
-  const boot = jsonForInlineScript({ page, roles: options.principal?.roles ?? [], api: employeeOnly ? EMPLOYEE_UI_API_CONTRACT : UI_API_CONTRACT });
+  const body = options.trustedBody ?? pageContent(page, employeeOnly, canManageAccounts);
+  const api = employeeOnly
+    ? EMPLOYEE_UI_API_CONTRACT
+    : canManageAccounts ? UI_API_CONTRACT : READ_ONLY_ACCOUNT_UI_API_CONTRACT;
+  const boot = jsonForInlineScript({ page, roles: options.principal?.roles ?? [], api });
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -597,7 +609,7 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script>window.__LAN_CLOUD_UI__ = ${boot};</script>
-  <script>${clientScript()}</script>
+  <script>${clientScript(canManageAccounts)}</script>
 </body>
 </html>`;
 }
@@ -644,7 +656,7 @@ function styles(): string {
   `;
 }
 
-function clientScript(): string {
+function clientScript(canManageAccounts: boolean): string {
   return `
     (() => {
       const config = window.__LAN_CLOUD_UI__ || {};
@@ -815,7 +827,7 @@ function clientScript(): string {
         return String(value);
       };
       const collectionRows = {};
-      const accountsFilterState = { owner: '', asset: '', status: '', q: '' };
+      ${canManageAccounts ? "const accountsFilterState = { owner: '', asset: '', status: '', q: '' };" : ''}
       const WRAPPABLE_COLUMNS = new Set(['notes', 'detail_json', 'summary_json', 'account_identifier_masked']);
       const cellTag = (key, content) => '<td' + (WRAPPABLE_COLUMNS.has(key) ? ' class="cell-wrap"' : '') + '>' + content + '</td>';
       const renderRowsInto = (panel, rows, totalCount) => {
@@ -833,7 +845,7 @@ function clientScript(): string {
         const financeBatchActions = panel.dataset.collection === 'reimbursement-batches' && canReviewFinance;
         const editablePeople = panel.dataset.collection === 'people' && canManageUsers && Boolean(document.getElementById('user-edit-panel'));
         const editableWhitelist = panel.dataset.collection === 'login-whitelist' && canManageUsers;
-        const editableAccounts = panel.dataset.collection === 'accounts' && canManageAccounts && Boolean(document.getElementById(['account', 'edit', 'panel'].join('-')));
+        ${canManageAccounts ? "const editableAccounts = panel.dataset.collection === 'accounts' && canManageAccounts && Boolean(document.getElementById('account-edit-panel'));" : 'const editableAccounts = false;'}
         const hasActions = editableSubscriptions || financeBatchActions || editablePeople || editableWhitelist || editableAccounts;
         const batchActionCell = (row) => {
           if (!row || typeof row.id !== 'string') return '<td>—</td>';
@@ -857,9 +869,9 @@ function clientScript(): string {
           if (editableWhitelist) {
             return '<td><button class="button secondary" type="button" data-action="delete-whitelist-rule" data-rule-id="' + escapeHtml(row.id) + '">删除</button></td>';
           }
-          if (editableAccounts) {
+          ${canManageAccounts ? `if (editableAccounts) {
             return '<td><button class="button secondary" type="button" data-action="edit-account" data-account-id="' + escapeHtml(row.id) + '">编辑</button></td>';
-          }
+          }` : ''}
           return '';
         };
         const head = (selectableCandidates ? '<th><input type="checkbox" data-action="toggle-all-candidates" aria-label="全选候选费用" title="全选/全不选" /></th>' : '') + keys.map((key) => '<th>' + escapeHtml(labelFor(panel.dataset.collection, key)) + '</th>').join('') + (hasActions ? '<th>操作</th>' : '');
@@ -876,7 +888,7 @@ function clientScript(): string {
         }).join('') : body;
         panel.innerHTML = '<table' + (hasActions ? ' class="sticky-actions"' : '') + '><thead><tr>' + head + '</tr></thead><tbody>' + candidateBody + '</tbody></table>';
       };
-      const applyAccountsFilter = () => {
+      ${canManageAccounts ? `const applyAccountsFilter = () => {
         const panel = document.querySelector('[data-collection="accounts"]');
         if (!panel) return;
         const all = collectionRows.accounts || [];
@@ -895,11 +907,12 @@ function clientScript(): string {
           return true;
         });
         renderRowsInto(panel, rows, all.length);
-      };
+      };` : ''}
       const renderCollection = (panel, payload) => {
         const rows = recordsFrom(payload);
         collectionRows[panel.dataset.collection] = rows;
         if (panel.dataset.collection === 'accounts') {
+          ${canManageAccounts ? `
           const assetValues = Array.from(new Set(rows
             .map((row) => row && typeof row.asset_identifier === 'string' ? row.asset_identifier.trim() : '')
             .filter(Boolean)))
@@ -912,7 +925,8 @@ function clientScript(): string {
             if (assetValues.includes(accountsFilterState.asset)) assetSelect.value = accountsFilterState.asset;
             else accountsFilterState.asset = '';
           }
-          return applyAccountsFilter();
+          return applyAccountsFilter();` : `
+          return renderRowsInto(panel, rows, rows.length);`}
         }
         renderRowsInto(panel, rows, rows.length);
       };
@@ -997,7 +1011,7 @@ function clientScript(): string {
         Object.keys(values).forEach((key) => { if (values[key] === '') delete values[key]; });
         try {
           let url = endpointKey === 'subscriptions' ? api.subscriptions
-            : endpointKey === 'account-assets' ? api.accountAssets
+            ${canManageAccounts ? ": endpointKey === 'account-assets' ? api.accountAssets" : ''}
             : endpointKey === 'fx-quotes' ? api.fxQuotes
             : endpointKey === 'users' ? api.users
             : endpointKey === 'login-whitelist' ? api.loginWhitelist
@@ -1011,7 +1025,7 @@ function clientScript(): string {
             method = 'PUT';
             payload = { display_name: values.display_name, employment_status: values.employment_status };
           }
-          if (endpointKey === 'account-operational') {
+          ${canManageAccounts ? `if (endpointKey === 'account-operational') {
             const accountId = values.account_id;
             if (!accountId) throw new Error('缺少账号资产 ID。');
             url = api.accountOperational.replace(':id', encodeURIComponent(accountId));
@@ -1025,7 +1039,7 @@ function clientScript(): string {
               expires_on: values.expires_on || null,
               vault_ref: values.vault_ref || null,
             };
-          }
+          }` : ''}
           if (endpointKey === 'user-roles') {
             const userId = values.user_id;
             if (!userId) throw new Error('请选择用户。');
@@ -1113,13 +1127,13 @@ function clientScript(): string {
           button.setAttribute('aria-expanded', panel.hidden ? 'false' : 'true');
           return;
         }
-        if (action === ['toggle', 'create', 'account'].join('-')) {
-          const panel = document.getElementById(['account', 'create', 'panel'].join('-'));
+        ${canManageAccounts ? `if (action === 'toggle-create-account') {
+          const panel = document.getElementById('account-create-panel');
           if (!panel) return;
           panel.hidden = !panel.hidden;
           button.setAttribute('aria-expanded', panel.hidden ? 'false' : 'true');
           return;
-        }
+        }` : ''}
         if (action === 'edit-subscription') {
           const panel = document.getElementById('subscription-edit-panel');
           const rows = collectionRows.subscriptions || [];
@@ -1173,8 +1187,8 @@ function clientScript(): string {
           }
           return;
         }
-        if (action === 'edit-account') {
-          const panel = document.getElementById(['account', 'edit', 'panel'].join('-'));
+        ${canManageAccounts ? `if (action === 'edit-account') {
+          const panel = document.getElementById('account-edit-panel');
           const rows = collectionRows.accounts || [];
           const row = rows.find((candidate) => candidate && candidate.id === button.dataset.accountId);
           if (!panel || !row) return;
@@ -1192,14 +1206,14 @@ function clientScript(): string {
           return;
         }
         if (action === 'cancel-edit-account') {
-          const panel = document.getElementById(['account', 'edit', 'panel'].join('-'));
+          const panel = document.getElementById('account-edit-panel');
           if (panel) {
             panel.hidden = true;
             const form = panel.querySelector('form');
             if (form) form.reset();
           }
           return;
-        }
+        }` : ''}
         if (action === 'delete-whitelist-rule') {
           const ruleId = button.dataset.ruleId;
           if (!ruleId) return;
@@ -1330,14 +1344,14 @@ function clientScript(): string {
           return;
         }
       });
-      const onAccountsFilterChange = (event) => {
+      ${canManageAccounts ? `const onAccountsFilterChange = (event) => {
         const el = event.target.closest('[data-accounts-filter]');
         if (!el) return;
         accountsFilterState[el.dataset.accountsFilter] = el.value;
         applyAccountsFilter();
       };
       document.addEventListener('input', onAccountsFilterChange);
-      document.addEventListener('change', onAccountsFilterChange);
+      document.addEventListener('change', onAccountsFilterChange);` : ''}
       const renderBarChart = (container, series) => {
         const width = 720;
         const height = 210;

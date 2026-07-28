@@ -261,15 +261,39 @@ describe('identity settings and external binding UI', () => {
     expect(accounts).not.toContain('name="vendor_id"');
   });
 
-  it('keeps account asset management controls hidden from employees', () => {
-    const accounts = ui.renderAdminUi({
+  it('emits account management controls and script branches only to asset administrators', () => {
+    const assetAdmin = ui.renderAdminUi({
       page: 'accounts',
-      principal: { displayName: 'employee@lancloudtech.com', roles: ['employee'] },
+      principal: { displayName: 'asset-admin@lancloudtech.com', roles: ['asset_admin'] },
     });
+    expect(assetAdmin).toContain('data-action="toggle-create-account"');
+    expect(assetAdmin).toContain('data-action="edit-account"');
+    expect(assetAdmin).toContain('data-action="cancel-edit-account"');
+    expect(assetAdmin).toContain('data-api="account-operational"');
+    expect(assetAdmin).toContain('api.accountOperational');
+    expect(assetAdmin).toContain('/api/account-assets/:id');
 
-    expect(accounts).not.toContain('toggle-create-account');
-    expect(accounts).not.toContain('account-create-panel');
-    expect(accounts).not.toContain('account-edit-panel');
-    expect(accounts).not.toContain('data-accounts-filter="asset"');
+    const readOnlyPrincipals: Array<{ displayName: string; roles: string[] }> = [
+      { displayName: 'employee@lancloudtech.com', roles: ['employee'] },
+      { displayName: 'auditor@lancloudtech.com', roles: ['auditor'] },
+      { displayName: 'reviewer@lancloudtech.com', roles: ['finance_reviewer'] },
+      { displayName: 'payer@lancloudtech.com', roles: ['payer'] },
+      { displayName: 'unassigned@lancloudtech.com', roles: [] },
+    ];
+    for (const principal of readOnlyPrincipals) {
+      const accounts = ui.renderAdminUi({ page: 'accounts', principal });
+      for (const identifier of [
+        'toggle-create-account',
+        'account-create-panel',
+        'account-edit-panel',
+        'data-accounts-filter="asset"',
+        'edit-account',
+        'cancel-edit-account',
+        'account-operational',
+        'api.accountOperational',
+        '/api/account-assets/:id',
+      ]) expect(accounts).not.toContain(identifier);
+      expect(accounts).toContain('data-collection="accounts"');
+    }
   });
 });
