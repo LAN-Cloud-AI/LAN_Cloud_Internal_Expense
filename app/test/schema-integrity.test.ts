@@ -30,6 +30,23 @@ function createDatabase(): Database.Database {
   return database;
 }
 
+function createDatabaseBeforeAccountIdentifierMigration(): Database.Database {
+  const database = new Database(':memory:');
+  database.pragma('foreign_keys = ON');
+
+  for (const migrationName of readdirSync(migrationsDir)
+    .filter((name) => name.endsWith('.sql') && name < '0015_account_asset_identifier.sql')
+    .sort()) {
+    if (migrationName === '0006_access_identities.sql') {
+      seedLedger(database);
+    }
+    database.exec(readFileSync(join(migrationsDir, migrationName), 'utf8'));
+  }
+
+  databases.push(database);
+  return database;
+}
+
 function seedLedger(database: Database.Database): void {
   database.exec(`
     INSERT INTO users (id, external_subject, display_name)
@@ -231,5 +248,36 @@ describe('访问身份与绑定事务完整性约束', () => {
 
     insertCorporateIdentity('identity-email-a', 'user-1', 'https://github.com', 'github-user-a');
     expect(() => insertCorporateIdentity('identity-email-b', 'user-2', 'https://github.com', 'github-user-b')).not.toThrow();
+  });
+});
+
+describe('账号资产标识迁移', () => {
+  it('按显示名称回填服务或平台标识，并保留未匹配历史资产为未分类', () => {
+    const database = createDatabaseBeforeAccountIdentifierMigration();
+    database.exec(
+      "INSERT INTO account_assets (id, display_name, account_identifier_masked) VALUES " +
+        "('asset-obs', '示例成员的OBS', 'example-obs')," +
+        "('asset-github-id', '示例成员 · GitHub ID', 'example-github-id')," +
+        "('asset-github-email', '示例成员 · GitHub 邮箱', 'example-github-email')," +
+        "('asset-leadshunter', '示例成员 · LeadsHunter 用户名', 'example-leadshunter')," +
+        "('asset-obsidian', '示例成员 · Obsidian', 'example-obsidian')," +
+        "('asset-domain-mail', '示例成员 · 兰芯域名邮箱', 'example-domain-mail')," +
+        "('asset-unmatched', '未匹配的旧资产', 'example-unmatched')",
+    );
+    database.exec(readFileSync(join(migrationsDir, '0015_account_asset_identifier.sql'), 'utf8'));
+
+    expect(
+      database.prepare(
+        'SELECT id, asset_identifier FROM account_assets ORDER BY id',
+      ).all(),
+    ).toEqual([
+      { id: 'asset-domain-mail', asset_identifier: '兰芯域名邮箱' },
+      { id: 'asset-github-email', asset_identifier: 'GitHub' },
+      { id: 'asset-github-id', asset_identifier: 'GitHub' },
+      { id: 'asset-leadshunter', asset_identifier: 'LeadsHunter' },
+      { id: 'asset-obs', asset_identifier: 'OBS' },
+      { id: 'asset-obsidian', asset_identifier: 'Obsidian' },
+      { id: 'asset-unmatched', asset_identifier: '未分类' },
+    ]);
   });
 });
