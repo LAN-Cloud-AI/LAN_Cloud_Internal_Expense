@@ -1604,49 +1604,29 @@ app.post('/api/account-assets', async (c) => {
   const body = await jsonBody(c);
   const id = crypto.randomUUID();
   const displayName = requiredString(body, 'display_name', 120);
+  const assetIdentifier = requiredString(body, 'asset_identifier', 120);
   const accountIdentifierMasked = requiredString(body, 'account_identifier_masked', 160);
   const ownerUserId = optionalString(body, 'owner_user_id', 80);
   const vaultRef = optionalString(body, 'vault_ref', 255);
   const expiresOn = optionalIsoDate(optionalString(body, 'expires_on', 10), 'expires_on');
   await c.env.DB.prepare(
     `INSERT INTO account_assets (
-       id, owner_user_id, account_identifier_masked, display_name, vault_ref, expires_on
-     ) VALUES (?, ?, ?, ?, ?, ?)`,
-  ).bind(id, ownerUserId, accountIdentifierMasked, displayName, vaultRef, expiresOn).run();
-  await appendAudit(c.env, auth.userId, 'create_account_asset', 'account_asset', id, { display_name: displayName });
+       id, owner_user_id, account_identifier_masked, display_name, asset_identifier, vault_ref, expires_on
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, ownerUserId, accountIdentifierMasked, displayName, assetIdentifier, vaultRef, expiresOn).run();
+  await appendAudit(c.env, auth.userId, 'create_account_asset', 'account_asset', id, { display_name: displayName, asset_identifier: assetIdentifier });
   return c.json({ account_asset_id: id }, 201);
 });
 
-app.get('/api/account-field-definitions', async (c) => {
-  const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor']);
-  if (isResponse(auth)) return auth;
-  const fields = await c.env.DB.prepare(
-    `SELECT id, field_key, label, field_type, options_json, required, active, created_at
-     FROM account_field_definitions WHERE active = 1 ORDER BY field_key`,
-  ).all();
-  return c.json({ data: fields.results });
-});
+const accountFieldsDeprecated = (c: AppContext) => problem(
+  c,
+  410,
+  'account_fields_deprecated',
+  '账号资产的追加字段功能已弃用。',
+);
 
-app.post('/api/account-field-definitions', async (c) => {
-  const auth = requireRoles(c, DATA_ADMIN_ROLES);
-  if (isResponse(auth)) return auth;
-  const body = await jsonBody(c);
-  const id = crypto.randomUUID();
-  const fieldKey = requiredString(body, 'field_key', 40);
-  if (!/^[a-z][a-z0-9_]*$/.test(fieldKey)) throw new ApiProblem(400, 'invalid_field_key', 'field_key 只能使用小写字母、数字和下划线。');
-  const label = requiredString(body, 'label', 60);
-  const fieldType = enumValue(body, 'field_type', ['text', 'integer', 'date', 'boolean', 'select'] as const);
-  const options = optionalString(body, 'options', 1000);
-  const optionsJson = fieldType === 'select' && options
-    ? JSON.stringify(options.split(',').map((option) => option.trim()).filter(Boolean))
-    : null;
-  await c.env.DB.prepare(
-    `INSERT INTO account_field_definitions (id, field_key, label, field_type, options_json)
-     VALUES (?, ?, ?, ?, ?)`,
-  ).bind(id, fieldKey, label, fieldType, optionsJson).run();
-  await appendAudit(c.env, auth.userId, 'create_account_field_definition', 'account_field_definition', id, { field_key: fieldKey });
-  return c.json({ account_field_definition_id: id }, 201);
-});
+app.get('/api/account-field-definitions', accountFieldsDeprecated);
+app.post('/api/account-field-definitions', accountFieldsDeprecated);
 
 app.put('/api/account-assets/:accountId', async (c) => {
   const auth = requireRoles(c, DATA_ADMIN_ROLES);
@@ -1654,13 +1634,14 @@ app.put('/api/account-assets/:accountId', async (c) => {
   const body = await jsonBody(c);
   const accountId = c.req.param('accountId');
   const existing = await c.env.DB.prepare(
-    `SELECT id, owner_user_id, account_identifier_masked, display_name, vault_ref, status, expires_on
+    `SELECT id, owner_user_id, account_identifier_masked, display_name, asset_identifier, vault_ref, status, expires_on
      FROM account_assets WHERE id = ?`,
   ).bind(accountId).first<{
     id: string;
     owner_user_id: string | null;
     account_identifier_masked: string;
     display_name: string;
+    asset_identifier: string;
     vault_ref: string | null;
     status: string;
     expires_on: string | null;
@@ -1670,6 +1651,9 @@ app.put('/api/account-assets/:accountId', async (c) => {
   const accountIdentifier = body.account_identifier === undefined
     ? existing.account_identifier_masked
     : requiredString(body, 'account_identifier', 160);
+  const assetIdentifier = body.asset_identifier === undefined
+    ? existing.asset_identifier
+    : requiredString(body, 'asset_identifier', 120);
   let ownerUserId = existing.owner_user_id;
   if (body.owner_user_id !== undefined) {
     ownerUserId = optionalString(body, 'owner_user_id', 80);
@@ -1687,53 +1671,14 @@ app.put('/api/account-assets/:accountId', async (c) => {
     : enumValue(body, 'status', ['active', 'inactive', 'retired'] as const);
   await c.env.DB.prepare(
     `UPDATE account_assets
-     SET display_name = ?, account_identifier_masked = ?, owner_user_id = ?, vault_ref = ?, expires_on = ?, status = ?
+     SET display_name = ?, asset_identifier = ?, account_identifier_masked = ?, owner_user_id = ?, vault_ref = ?, expires_on = ?, status = ?
      WHERE id = ?`,
-  ).bind(displayName, accountIdentifier, ownerUserId, vaultRef, expiresOn, status, accountId).run();
-  await appendAudit(c.env, auth.userId, 'update_account_asset', 'account_asset', accountId, { display_name: displayName, status });
+  ).bind(displayName, assetIdentifier, accountIdentifier, ownerUserId, vaultRef, expiresOn, status, accountId).run();
+  await appendAudit(c.env, auth.userId, 'update_account_asset', 'account_asset', accountId, { display_name: displayName, asset_identifier: assetIdentifier, status });
   return c.json({ account_asset_id: accountId });
 });
 
-app.put('/api/account-assets/:accountId/field-values', async (c) => {
-  const auth = requireRoles(c, DATA_ADMIN_ROLES);
-  if (isResponse(auth)) return auth;
-  const body = await jsonBody(c);
-  if (!Array.isArray(body.values) || body.values.length === 0) {
-    throw new ApiProblem(400, 'invalid_field_values', 'values 必须至少包含一个追加字段值。');
-  }
-  const accountId = c.req.param('accountId');
-  const statements: D1PreparedStatement[] = [];
-  for (const value of body.values) {
-    if (!isRecord(value)) throw new ApiProblem(400, 'invalid_field_values', '每个追加字段值必须是对象。');
-    const definitionId = requiredString(value, 'field_definition_id', 80);
-    const valueText = optionalString(value, 'value_text', 1000);
-    const valueInteger = value.value_integer === undefined || value.value_integer === null || value.value_integer === ''
-      ? null
-      : integer(value, 'value_integer');
-    const valueDate = optionalIsoDate(optionalString(value, 'value_date', 10), 'value_date');
-    const valueBoolean = value.value_boolean === undefined || value.value_boolean === null || value.value_boolean === ''
-      ? null
-      : integer(value, 'value_boolean', 0);
-    if (valueBoolean !== null && valueBoolean !== 0 && valueBoolean !== 1) throw new ApiProblem(400, 'invalid_field_values', 'value_boolean 必须为 0 或 1。');
-    statements.push(c.env.DB.prepare(
-      `INSERT INTO account_field_values (
-         account_asset_id, field_definition_id, value_text, value_integer, value_date, value_boolean, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-       ON CONFLICT(account_asset_id, field_definition_id) DO UPDATE SET
-         value_text = excluded.value_text,
-         value_integer = excluded.value_integer,
-         value_date = excluded.value_date,
-         value_boolean = excluded.value_boolean,
-         updated_at = excluded.updated_at`,
-    ).bind(accountId, definitionId, valueText, valueInteger, valueDate, valueBoolean));
-  }
-  statements.push(c.env.DB.prepare(
-    `INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, detail_json)
-     VALUES (?, ?, 'update_account_field_values', 'account_asset', ?, ?)`,
-  ).bind(crypto.randomUUID(), auth.userId, accountId, JSON.stringify({ count: body.values.length })));
-  await c.env.DB.batch(statements);
-  return c.json({ account_asset_id: accountId, updated: body.values.length });
-});
+app.put('/api/account-assets/:accountId/field-values', accountFieldsDeprecated);
 
 function selectedCandidateIds(body: Record<string, unknown>): string[] {
   try {

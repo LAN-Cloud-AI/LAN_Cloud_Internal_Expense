@@ -176,18 +176,28 @@ describe('account asset editing', () => {
 
     const update = await mutate(app, env, 'PUT', '/api/account-assets/acc-1', {
       display_name: '新账号',
+      asset_identifier: '更新后服务',
       account_identifier: 'new@example.com',
       owner_user_id: 'user-owner',
       expires_on: '2027-01-01',
       status: 'inactive',
     });
     expect(update.status).toBe(200);
-    const row = database.prepare(`SELECT display_name, account_identifier_masked, owner_user_id, expires_on, status FROM account_assets WHERE id = 'acc-1'`).get() as Record<string, unknown>;
+    const row = database.prepare(`SELECT display_name, asset_identifier, account_identifier_masked, owner_user_id, expires_on, status FROM account_assets WHERE id = 'acc-1'`).get() as Record<string, unknown>;
     expect(row).toMatchObject({
       display_name: '新账号',
+      asset_identifier: '更新后服务',
       account_identifier_masked: 'new@example.com',
       owner_user_id: 'user-owner',
       expires_on: '2027-01-01',
+      status: 'inactive',
+    });
+    const updatedAudit = database.prepare(
+      "SELECT detail_json FROM audit_events WHERE action = 'update_account_asset' AND entity_id = 'acc-1'",
+    ).get() as { detail_json: string };
+    expect(JSON.parse(updatedAudit.detail_json)).toMatchObject({
+      display_name: '新账号',
+      asset_identifier: '更新后服务',
       status: 'inactive',
     });
 
@@ -195,6 +205,69 @@ describe('account asset editing', () => {
     expect(ghost.status).toBe(404);
     const badOwner = await mutate(app, env, 'PUT', '/api/account-assets/acc-1', { owner_user_id: 'ghost-user' });
     expect(badOwner.status).toBe(404);
+  });
+
+  it('creates and lists asset identifiers, and rejects retired dynamic fields', async () => {
+    const { app, env, database } = setup();
+    await adminSession(app, env, database);
+
+    const created = await mutate(app, env, 'POST', '/api/account-assets', {
+      display_name: '演示 OBS 账号',
+      asset_identifier: 'OBS',
+      account_identifier_masked: 'demo-account',
+    });
+    expect(created.status).toBe(201);
+
+    const stored = database.prepare(
+      "SELECT display_name, asset_identifier, account_identifier_masked " +
+      "FROM account_assets WHERE account_identifier_masked = 'demo-account'",
+    ).get();
+    expect(stored).toMatchObject({
+      display_name: '演示 OBS 账号',
+      asset_identifier: 'OBS',
+      account_identifier_masked: 'demo-account',
+    });
+    const createdAudit = database.prepare(
+      "SELECT detail_json FROM audit_events WHERE action = 'create_account_asset'",
+    ).get() as { detail_json: string };
+    expect(JSON.parse(createdAudit.detail_json)).toMatchObject({
+      display_name: '演示 OBS 账号',
+      asset_identifier: 'OBS',
+    });
+
+    const list = await request(app, env, '/api/account-assets', 'admin');
+    expect(list.status).toBe(200);
+    const listBody = await list.json() as { data: Array<Record<string, unknown>> };
+    expect(listBody.data).toContainEqual(expect.objectContaining({
+      display_name: '演示 OBS 账号',
+      asset_identifier: 'OBS',
+    }));
+
+    const blank = await mutate(app, env, 'POST', '/api/account-assets', {
+      display_name: '缺少资产标识',
+      asset_identifier: '   ',
+      account_identifier_masked: 'demo-blank',
+    });
+    expect(blank.status).toBe(400);
+
+    const fields = await request(app, env, '/api/account-field-definitions', 'admin');
+    expect(fields.status).toBe(410);
+    const fieldsBody = await fields.json() as { error: { code: string } };
+    expect(fieldsBody.error.code).toBe('account_fields_deprecated');
+
+    const createdField = await mutate(app, env, 'POST', '/api/account-field-definitions', {
+      field_key: 'legacy_field',
+      label: '旧字段',
+      field_type: 'text',
+    });
+    expect(createdField.status).toBe(410);
+    const createdFieldBody = await createdField.json() as { error: { code: string } };
+    expect(createdFieldBody.error.code).toBe('account_fields_deprecated');
+
+    const values = await mutate(app, env, 'PUT', '/api/account-assets/missing/field-values', { values: [] });
+    expect(values.status).toBe(410);
+    const valuesBody = await values.json() as { error: { code: string } };
+    expect(valuesBody.error.code).toBe('account_fields_deprecated');
   });
 });
 
