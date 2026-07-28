@@ -33,7 +33,7 @@
 
 ### D1 账本模型
 
-`migrations/0001_initial.sql` 建立的主要边界：
+当前 D1 账本模型由追加式 migration 演进；`asset_identifier` 由 `0015_account_asset_identifier.sql` 添加。主要边界：
 
 - `users`、`roles`、`user_roles`：登录主体与业务角色。
 - `subscriptions`、`subscription_term_versions`：订阅主数据及不可重叠的价格/周期版本。

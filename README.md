@@ -65,13 +65,8 @@ cd LAN_Cloud_Internal_Expense/app
 npm ci
 npm test
 npm run typecheck
-npm run dev
-```
-
-本地 D1 migration：
-
-```bash
 npm run db:migrations:local
+npm run dev
 ```
 
 账号资产的 `asset_identifier` 是固定字段：管理员可在新增或编辑时维护，并在账号资产清单中筛选。旧的动态追加字段功能已退役；本地开发请先执行上述 migration，再启动 Worker。生产环境也必须先完成 D1 migration，随后才部署 Worker。
