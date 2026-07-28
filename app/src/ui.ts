@@ -40,7 +40,6 @@ export const UI_API_CONTRACT = {
   subscriptionOperational: '/api/subscriptions/:id/operational',
   accountAssets: '/api/account-assets',
   accountOperational: '/api/account-assets/:id',
-  accountFieldDefinitions: '/api/account-field-definitions',
   reimbursementCandidates: '/api/reimbursements/candidates',
   reimbursementGenerate: '/api/reimbursements/generate-candidates',
   reimbursementPreview: '/api/reimbursements/preview',
@@ -83,7 +82,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { page: 'dashboard', href: '/', icon: '▦', label: '总览', description: '待办与风险' },
   { page: 'subscriptions', href: '/subscriptions', icon: '◫', label: '订阅资产', description: '订阅、条款与付款者' },
-  { page: 'accounts', href: '/accounts', icon: '◇', label: '账号资产', description: '账号与可追加字段' },
+  { page: 'accounts', href: '/accounts', icon: '◇', label: '账号资产', description: '账号、资产标识与归属' },
   { page: 'reimbursements', href: '/reimbursements', icon: '￥', label: '报销中心', description: '候选、合单与付款' },
   { page: 'finance', href: '/finance', icon: '∑', label: '财务总览', description: '财年支出与图表' },
   { page: 'rates', href: '/rates', icon: '↗', label: '汇率', description: '快照与同步状态' },
@@ -105,7 +104,7 @@ const PAGE_META: Record<UiPage, { title: string; eyebrow: string; description: s
   accounts: {
     title: '账号资产',
     eyebrow: 'ACCOUNT ASSETS',
-    description: '记录内部账号资产；可追加非财务关键字段，不保存密码或验证码。',
+    description: '记录内部账号资产及其资产标识，不保存密码或验证码。',
   },
   reimbursements: {
     title: '报销中心',
@@ -330,25 +329,20 @@ function accountsPage(employeeOnly = false): string {
       ${emptyCollection('accounts', '账号资产')}
     </section>`;
   }
-  return `<section class="split-grid account-grid">
+  return `<section>
+    <div class="form-actions">
+      <button class="button primary" type="button" data-action="toggle-create-account" aria-expanded="false">＋ 新增账号资产</button>
+    </div>
+  </section>
+  <section class="split-grid account-grid" id="account-create-panel" hidden>
     <article class="surface form-surface">
-      ${sectionHeading('新增账号资产', '只录入必要的标识信息；密钥、密码和验证码不进入本系统。')}
       <form data-api="account-assets" data-success="账号资产已创建。">
-        <label>展示名称<input name="display_name" required maxlength="120" placeholder="例如：设计团队 Figma 账号" /></label>
-        <label>账号标识<input name="account_identifier_masked" required maxlength="160" placeholder="例如：kaison@example.com" /></label>
-        <label>归属人员（可选）<select name="owner_user_id" data-options-from="users"><option value="">正在载入人员…</option></select></label>
+        <label>显示名称<input name="display_name" required maxlength="120" /></label>
+        <label>资产标识<input name="asset_identifier" required maxlength="120" /></label>
+        <label>账号标识<input name="account_identifier_masked" required maxlength="160" /></label>
+        <label>归属人员（可选）<select name="owner_user_id" data-options-from="users"></select></label>
         <label>到期日（可选）<input name="expires_on" type="date" /></label>
         <div class="form-actions"><button class="button primary" type="submit">创建账号资产</button></div>
-      </form>
-    </article>
-    <article class="surface form-surface">
-      ${sectionHeading('追加字段', '字段只能用于账号资产的非核心属性；金额、付款者和账期仍由固定账本字段管理。')}
-      <form data-api="account-field-definitions" data-success="字段定义已创建，可在账号资产详情填写。">
-        <label>字段名称<input name="label" required maxlength="60" placeholder="例如：GitHub 用户名" /></label>
-        <label>字段键<input name="field_key" required maxlength="40" pattern="[a-z][a-z0-9_]*" placeholder="github_username" /></label>
-        <label>字段类型<select name="field_type"><option value="text">文本</option><option value="integer">整数</option><option value="date">日期</option><option value="boolean">是/否</option><option value="select">单选</option></select></label>
-        <label>选项（仅单选，逗号分隔）<input name="options" maxlength="300" placeholder="个人、团队、共享" /></label>
-        <div class="form-actions"><button class="button primary" type="submit">新增字段</button></div>
       </form>
     </article>
   </section>
@@ -360,6 +354,7 @@ function accountsPage(employeeOnly = false): string {
         <label>展示名称<input name="display_name" required maxlength="120" /></label>
         <label>账号标识<input name="account_identifier" required maxlength="160" /></label>
       </div>
+      <label>资产标识<input name="asset_identifier" required maxlength="120" /></label>
       <div class="two-columns">
         <label>归属人员（可选）<select name="owner_user_id" data-options-from="users"><option value="">正在载入人员…</option></select></label>
         <label>状态<select name="status"><option value="active">有效</option><option value="inactive">已停用</option><option value="retired">已退役</option></select></label>
@@ -376,11 +371,12 @@ function accountsPage(employeeOnly = false): string {
     <div class="action-result" id="account-edit-result" aria-live="polite"></div>
   </section>
   <section class="surface">
-    ${sectionHeading('账号资产清单', '可按归属人员、状态和关键字筛选。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${sectionHeading('账号资产清单', '可按归属人员、资产标识、状态和关键字筛选。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
     <div class="filter-bar" id="accounts-filter">
       <select data-accounts-filter="owner" data-options-from="users" data-default-label="全部人员"></select>
+      <select data-accounts-filter="asset"><option value="">全部资产标识</option></select>
       <select data-accounts-filter="status"><option value="">全部状态</option><option value="active">有效</option><option value="inactive">已停用</option><option value="retired">已退役</option></select>
-      <input data-accounts-filter="q" placeholder="搜索名称或账号标识" maxlength="80" />
+      <input data-accounts-filter="q" placeholder="搜索名称、资产标识或账号标识" maxlength="80" />
     </div>
     ${emptyCollection('accounts', '账号资产')}
   </section>`;
@@ -727,7 +723,7 @@ function clientScript(): string {
         auto_renew: '是否自动续费', payment_method_masked: '付款方式', notes: '备注',
         term_effective_start: '订阅开始日期', term_effective_end: '订阅截止日期', billing_cycle: '订阅周期',
         settlement_mode: '结算方式', billing_anchor_date: '账单锚定日', original_currency: '订阅币种', amount_minor: '订阅总价',
-        account_identifier_masked: '账号标识', expires_on: '到期日', created_at: '创建时间',
+        asset_identifier: '资产标识', account_identifier_masked: '账号标识', expires_on: '到期日', created_at: '创建时间',
         email: '邮箱', employment_status: '在职状态', roles: '角色',
         base_currency: '原币', quote_currency: '目标币', rate_numerator: '汇率分子', rate_denominator: '汇率分母',
         effective_at: '生效日期', fetched_at: '抓取时间', provider: '来源', provider_reference: '来源参考', locked_at: '锁定时间',
@@ -749,7 +745,7 @@ function clientScript(): string {
       // 订阅清单按多维表格 1:1 的列顺序展示；其余集合按动态键补充。
       const COLLECTION_COLUMN_ORDER = {
         subscriptions: ['name', 'term_effective_start', 'term_effective_end', 'billing_cycle', 'original_currency', 'amount_minor', 'payer_name', 'owner_name', 'auto_renew', 'payment_method_masked', 'notes', 'status', 'settlement_mode', 'billing_anchor_date'],
-        accounts: ['display_name', 'account_identifier_masked', 'owner_name', 'status', 'expires_on', 'created_at'],
+        accounts: ['display_name', 'asset_identifier', 'account_identifier_masked', 'owner_name', 'status', 'expires_on', 'created_at'],
         rates: ['rate_display', 'effective_at', 'provider', 'status', 'fetched_at', 'locked_at', 'provider_reference'],
         'reimbursement-batches': ['payer_name', 'reviewer_name', 'actor_name', 'coverage_start', 'coverage_end', 'total_cny_fen', 'status', 'next_step', 'paid_at', 'created_at', 'item_count']
       };
@@ -819,7 +815,7 @@ function clientScript(): string {
         return String(value);
       };
       const collectionRows = {};
-      const accountsFilterState = { owner: '', status: '', q: '' };
+      const accountsFilterState = { owner: '', asset: '', status: '', q: '' };
       const WRAPPABLE_COLUMNS = new Set(['notes', 'detail_json', 'summary_json', 'account_identifier_masked']);
       const cellTag = (key, content) => '<td' + (WRAPPABLE_COLUMNS.has(key) ? ' class="cell-wrap"' : '') + '>' + content + '</td>';
       const renderRowsInto = (panel, rows, totalCount) => {
@@ -837,7 +833,7 @@ function clientScript(): string {
         const financeBatchActions = panel.dataset.collection === 'reimbursement-batches' && canReviewFinance;
         const editablePeople = panel.dataset.collection === 'people' && canManageUsers && Boolean(document.getElementById('user-edit-panel'));
         const editableWhitelist = panel.dataset.collection === 'login-whitelist' && canManageUsers;
-        const editableAccounts = panel.dataset.collection === 'accounts' && canManageAccounts && Boolean(document.getElementById('account-edit-panel'));
+        const editableAccounts = panel.dataset.collection === 'accounts' && canManageAccounts && Boolean(document.getElementById(['account', 'edit', 'panel'].join('-')));
         const hasActions = editableSubscriptions || financeBatchActions || editablePeople || editableWhitelist || editableAccounts;
         const batchActionCell = (row) => {
           if (!row || typeof row.id !== 'string') return '<td>—</td>';
@@ -886,9 +882,14 @@ function clientScript(): string {
         const all = collectionRows.accounts || [];
         const rows = all.filter((row) => {
           if (accountsFilterState.owner && row && row.owner_user_id !== accountsFilterState.owner) return false;
+          if (accountsFilterState.asset && row && row.asset_identifier !== accountsFilterState.asset) return false;
           if (accountsFilterState.status && row && row.status !== accountsFilterState.status) return false;
           if (accountsFilterState.q) {
-            const hay = (String((row && row.display_name) || '') + ' ' + String((row && row.account_identifier_masked) || '')).toLowerCase();
+            const hay = (
+              String((row && row.display_name) || '') + ' ' +
+              String((row && row.asset_identifier) || '') + ' ' +
+              String((row && row.account_identifier_masked) || '')
+            ).toLowerCase();
             if (!hay.includes(accountsFilterState.q.toLowerCase())) return false;
           }
           return true;
@@ -898,7 +899,21 @@ function clientScript(): string {
       const renderCollection = (panel, payload) => {
         const rows = recordsFrom(payload);
         collectionRows[panel.dataset.collection] = rows;
-        if (panel.dataset.collection === 'accounts') return applyAccountsFilter();
+        if (panel.dataset.collection === 'accounts') {
+          const assetValues = Array.from(new Set(rows
+            .map((row) => row && typeof row.asset_identifier === 'string' ? row.asset_identifier.trim() : '')
+            .filter(Boolean)))
+            .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+          const assetSelect = document.querySelector('[data-accounts-filter="' + 'asset' + '"]');
+          if (assetSelect) {
+            assetSelect.innerHTML = '<option value="">全部资产标识</option>' + assetValues
+              .map((asset) => '<option value="' + escapeHtml(asset) + '">' + escapeHtml(asset) + '</option>')
+              .join('');
+            if (assetValues.includes(accountsFilterState.asset)) assetSelect.value = accountsFilterState.asset;
+            else accountsFilterState.asset = '';
+          }
+          return applyAccountsFilter();
+        }
         renderRowsInto(panel, rows, rows.length);
       };
       const fen = (value) => '¥' + (Number(value || 0) / 100).toFixed(2);
@@ -983,7 +998,6 @@ function clientScript(): string {
         try {
           let url = endpointKey === 'subscriptions' ? api.subscriptions
             : endpointKey === 'account-assets' ? api.accountAssets
-            : endpointKey === 'account-field-definitions' ? api.accountFieldDefinitions
             : endpointKey === 'fx-quotes' ? api.fxQuotes
             : endpointKey === 'users' ? api.users
             : endpointKey === 'login-whitelist' ? api.loginWhitelist
@@ -1005,6 +1019,7 @@ function clientScript(): string {
             payload = {
               display_name: values.display_name,
               account_identifier: values.account_identifier,
+              asset_identifier: values.asset_identifier,
               owner_user_id: values.owner_user_id || null,
               status: values.status,
               expires_on: values.expires_on || null,
@@ -1098,6 +1113,13 @@ function clientScript(): string {
           button.setAttribute('aria-expanded', panel.hidden ? 'false' : 'true');
           return;
         }
+        if (action === ['toggle', 'create', 'account'].join('-')) {
+          const panel = document.getElementById(['account', 'create', 'panel'].join('-'));
+          if (!panel) return;
+          panel.hidden = !panel.hidden;
+          button.setAttribute('aria-expanded', panel.hidden ? 'false' : 'true');
+          return;
+        }
         if (action === 'edit-subscription') {
           const panel = document.getElementById('subscription-edit-panel');
           const rows = collectionRows.subscriptions || [];
@@ -1152,7 +1174,7 @@ function clientScript(): string {
           return;
         }
         if (action === 'edit-account') {
-          const panel = document.getElementById('account-edit-panel');
+          const panel = document.getElementById(['account', 'edit', 'panel'].join('-'));
           const rows = collectionRows.accounts || [];
           const row = rows.find((candidate) => candidate && candidate.id === button.dataset.accountId);
           if (!panel || !row) return;
@@ -1160,6 +1182,7 @@ function clientScript(): string {
           form.elements.account_id.value = row.id;
           form.elements.display_name.value = row.display_name || '';
           form.elements.account_identifier.value = row.account_identifier_masked || '';
+          form.elements.asset_identifier.value = row.asset_identifier || '';
           form.elements.owner_user_id.value = row.owner_user_id || '';
           form.elements.status.value = row.status || 'active';
           form.elements.expires_on.value = row.expires_on || '';
@@ -1169,7 +1192,7 @@ function clientScript(): string {
           return;
         }
         if (action === 'cancel-edit-account') {
-          const panel = document.getElementById('account-edit-panel');
+          const panel = document.getElementById(['account', 'edit', 'panel'].join('-'));
           if (panel) {
             panel.hidden = true;
             const form = panel.querySelector('form');

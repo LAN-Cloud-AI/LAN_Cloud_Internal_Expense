@@ -241,13 +241,35 @@ describe('identity settings and external binding UI', () => {
       page: 'accounts',
       principal: { displayName: 'admin@lancloudtech.com', roles: ['system_admin'] },
     });
+    expect(ui.UI_API_CONTRACT).not.toHaveProperty('accountFieldDefinitions');
     expect(accounts).toContain('data-options-from="users"');
+    expect(accounts).toContain('data-action="toggle-create-account"');
+    expect(accounts).toContain('id="account-create-panel" hidden');
+    expect(accounts).toContain('name="asset_identifier"');
     expect(accounts).toContain('id="account-edit-panel"');
     expect(accounts).toContain('data-action="edit-account"');
     expect(accounts).toContain('id="accounts-filter"');
     expect(accounts).toContain('data-accounts-filter="owner"');
+    expect(accounts).toContain('data-accounts-filter="asset"');
     expect(accounts).toContain('data-accounts-filter="status"');
     expect(accounts).toContain('data-accounts-filter="q"');
+    expect(accounts).toContain("asset_identifier: '资产标识'");
+    expect(accounts).toContain("accounts: ['display_name', 'asset_identifier', 'account_identifier_masked'");
+    expect(accounts).toContain('row.asset_identifier');
+    expect(accounts).not.toContain('data-api="account-field-definitions"');
+    expect(accounts).not.toContain('字段名称<input name="label"');
     expect(accounts).not.toContain('name="vendor_id"');
+  });
+
+  it('keeps account asset management controls hidden from employees', () => {
+    const accounts = ui.renderAdminUi({
+      page: 'accounts',
+      principal: { displayName: 'employee@lancloudtech.com', roles: ['employee'] },
+    });
+
+    expect(accounts).not.toContain('toggle-create-account');
+    expect(accounts).not.toContain('account-create-panel');
+    expect(accounts).not.toContain('account-edit-panel');
+    expect(accounts).not.toContain('data-accounts-filter="asset"');
   });
 });
