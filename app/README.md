@@ -8,7 +8,7 @@
 
 系统覆盖以下工作流：
 
-1. 记录内部人员的账号资产，并允许管理员追加非财务关键字段。
+1. 记录内部人员的账号资产：显示名称、固定且可筛选的资产标识、账号标识与归属人员；仅 `system_admin` 与 `asset_admin` 可创建或编辑。
 2. 管理订阅、订阅条款与付款者（均支持有效期与状态）。
 3. 按实际账单或按天摊销生成报销候选，锁定原币金额、汇率和 CNY 分金额。
 4. 批量勾选候选费用后，一次提交自动按**付款者**拆成一个或多个报销批次。
@@ -38,7 +38,8 @@
 - `users`、`roles`、`user_roles`：登录主体与业务角色。
 - `subscriptions`、`subscription_term_versions`：订阅主数据及不可重叠的价格/周期版本。
 - `payers`、`payer_assignments`：付款者与订阅付款者有效期。
-- `account_assets`、`account_field_definitions`、`account_field_values`：账号资产和可追加字段。
+- `account_assets`：显示名称、资产标识、账号标识与归属人员。
+- `account_field_definitions`、`account_field_values`：保留的历史弃用表，不再提供创建或编辑功能。
 - `fx_quotes`：以正整数有理数保存汇率快照，定义为“1 原币最小单位 = `numerator / denominator` CNY 分”。
 - `reimbursement_candidates`、`reimbursement_submissions`、`reimbursement_batches`、`reimbursement_items`：候选、一次提交、按付款者拆分的批次、锁定明细。
 - `sync_runs`、`audit_events`、`attachments`：汇率同步任务结果、审计和 R2 文件引用。
@@ -56,7 +57,7 @@
 | 角色 | 主要权限 |
 | --- | --- |
 | `system_admin` | 系统配置、用户与角色、来源连接 |
-| `asset_admin` | 订阅、账号资产与字段定义 |
+| `asset_admin` | 订阅与账号资产 |
 | `finance_reviewer` | 报销审核、付款确认、汇率人工复核 |
 | `payer` | 查看本人作为付款者的批次 |
 | `employee` | 查看自己被授权的账号/订阅范围 |
@@ -81,7 +82,7 @@
 
 ## 页面与 API 约定
 
-`src/ui.ts` 是无构建依赖的服务端页面壳。高权限角色可见总览、订阅资产、账号资产（可追加字段）、报销中心、财务总览、汇率、人员与权限；`employee` 可见本人范围的总览、订阅资产、账号资产、报销中心与个人设置。它通过同源 API 读取/提交，不在浏览器端保存任何密钥。
+`src/ui.ts` 是无构建依赖的服务端页面壳。高权限角色可见总览、订阅资产、账号资产、报销中心、财务总览、汇率、人员与权限；`system_admin` 与 `asset_admin` 可新增、编辑和按资产标识筛选账号资产，`employee` 只读查看本人范围的账号资产。它通过同源 API 读取/提交，不在浏览器端保存任何密钥。
 
 页面默认使用以下 API 契约，后端仍必须自行进行认证、角色检查、输入校验和 D1 事务/批处理：
 
@@ -89,13 +90,15 @@
 | --- | --- |
 | 总览 | `GET /api/dashboard` |
 | 订阅 | `GET/POST /api/subscriptions`、`POST /api/subscriptions/:id/term-versions`、`POST /api/subscriptions/:id/payer-assignments` |
-| 账号资产与追加字段 | `GET/POST /api/account-assets`、`GET/POST /api/account-field-definitions` |
+| 账号资产 | `GET/POST /api/account-assets`、`PUT /api/account-assets/:id` |
 | 报销 | `POST /api/reimbursements/generate-candidates`、`GET /api/reimbursements/candidates`、`POST /api/reimbursements/preview`、`POST /api/reimbursements/create-batches`、`GET /api/reimbursements/batches` |
 | 汇率 | `GET/POST /api/fx-quotes`、`POST /api/exchange-rates/sync` |
 | 人员与权限 | `GET/POST /api/users`、`PUT /api/users/:id/roles`、`GET /api/roles`、`GET/POST /api/payers` |
 | 附件与审计 | `POST/GET /api/attachments/...`、`GET /api/audit-events` |
 
 接口未启用或用户没有角色时，页面显示安全的空状态/错误消息，不把底层错误或密钥输出给浏览器。
+
+账号资产的 `asset_identifier` 是固定字段，创建时必填、编辑时可更新，并用于账号资产清单的筛选和展示。动态追加字段功能已退役：`GET/POST /api/account-field-definitions` 与 `PUT /api/account-assets/:id/field-values` 固定返回 `410 Gone`；历史表仅为保留既有数据，不再读取、创建或编辑。
 
 ## 无服务器边界与运维注意事项
 
@@ -109,9 +112,9 @@
 
 ```bash
 cd /Users/i/myCode/LAN_Cloud_Internal_Expense/app
-npm install
+npm ci
 npm run db:migrations:local
 npm run dev
 ```
 
-开发数据库位于 Wrangler 的本地状态目录，不应当作生产数据。不要提交本地 `.dev.vars`、`.wrangler` 状态或任何访问令牌。
+开发数据库位于 Wrangler 的本地状态目录，不应当作生产数据。更新 schema 后，先执行 `npm run db:migrations:local` 再启动本地 Worker；生产环境必须先完成 D1 migration，随后才部署 Worker。不要提交本地 `.dev.vars`、`.wrangler` 状态或任何访问令牌。
