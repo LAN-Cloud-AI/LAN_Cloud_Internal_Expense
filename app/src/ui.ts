@@ -40,6 +40,7 @@ export const UI_API_CONTRACT = {
   subscriptionOperational: '/api/subscriptions/:id/operational',
   accountAssets: '/api/account-assets',
   accountOperational: '/api/account-assets/:id',
+  accountOwners: '/api/account-owners',
   reimbursementCandidates: '/api/reimbursements/candidates',
   reimbursementGenerate: '/api/reimbursements/generate-candidates',
   reimbursementPreview: '/api/reimbursements/preview',
@@ -60,7 +61,11 @@ export const UI_API_CONTRACT = {
   auditEvents: '/api/audit-events',
 } as const;
 
-const { accountOperational: _accountOperational, ...READ_ONLY_ACCOUNT_UI_API_CONTRACT } = UI_API_CONTRACT;
+const {
+  accountOperational: _accountOperational,
+  accountOwners: _accountOwners,
+  ...READ_ONLY_ACCOUNT_UI_API_CONTRACT
+} = UI_API_CONTRACT;
 
 const EMPLOYEE_UI_API_CONTRACT = {
   dashboard: UI_API_CONTRACT.dashboard,
@@ -348,7 +353,7 @@ function accountsPage(canManageAccounts = false, employeeOnly = false): string {
         <label>显示名称<input name="display_name" required maxlength="120" /></label>
         <label>资产标识<input name="asset_identifier" required maxlength="120" /></label>
         <label>账号标识<input name="account_identifier_masked" required maxlength="160" /></label>
-        <label>归属人员（可选）<select name="owner_user_id" data-options-from="users"></select></label>
+        <label>归属人员（可选）<select name="owner_user_id" data-options-from="account-owners"></select></label>
         <label>到期日（可选）<input name="expires_on" type="date" /></label>
         <div class="form-actions"><button class="button primary" type="submit">创建账号资产</button></div>
       </form>
@@ -364,7 +369,7 @@ function accountsPage(canManageAccounts = false, employeeOnly = false): string {
       </div>
       <label>资产标识<input name="asset_identifier" required maxlength="120" /></label>
       <div class="two-columns">
-        <label>归属人员（可选）<select name="owner_user_id" data-options-from="users"><option value="">正在载入人员…</option></select></label>
+        <label>归属人员（可选）<select name="owner_user_id" data-options-from="account-owners"><option value="">正在载入人员…</option></select></label>
         <label>状态<select name="status"><option value="active">有效</option><option value="inactive">已停用</option><option value="retired">已退役</option></select></label>
       </div>
       <div class="two-columns">
@@ -381,7 +386,7 @@ function accountsPage(canManageAccounts = false, employeeOnly = false): string {
   <section class="surface">
     ${sectionHeading('账号资产清单', '可按归属人员、资产标识、状态和关键字筛选。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
     <div class="filter-bar" id="accounts-filter">
-      <select data-accounts-filter="owner" data-options-from="users" data-default-label="全部人员"></select>
+      <select data-accounts-filter="owner" data-options-from="account-owners" data-default-label="全部人员"></select>
       <select data-accounts-filter="asset"><option value="">全部资产标识</option></select>
       <select data-accounts-filter="status"><option value="">全部状态</option><option value="active">有效</option><option value="inactive">已停用</option><option value="retired">已退役</option></select>
       <input data-accounts-filter="q" placeholder="搜索名称、资产标识或账号标识" maxlength="80" />
@@ -706,14 +711,23 @@ function clientScript(canManageAccounts: boolean): string {
       const optionSources = {
         users: { url: () => api.users, value: 'id', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
         'active-users': { url: () => api.users, value: 'id', filter: (row) => row.employment_status === 'active', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
+        'account-owners': { url: () => api.accountOwners, value: 'id', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
         reviewers: { url: () => api.reimbursementReviewers, value: 'id', label: (row) => String(row.display_name || '') },
         roles: { url: () => api.roles, value: 'code', label: (row) => String(row.display_name || '') + ' · ' + String(row.code || '') }
+      };
+      const applyPendingSelectValue = (select) => {
+        if (select.dataset.pendingValue === undefined) return;
+        const pendingValue = select.dataset.pendingValue;
+        const isAvailable = Array.from(select.options).some((option) => option.value === pendingValue);
+        select.dataset.ownerSelectionReady = isAvailable ? 'true' : 'false';
+        if (isAvailable) select.value = pendingValue;
       };
       const loadOptionSelects = async () => {
         const selects = Array.from(document.querySelectorAll('select[data-options-from]'));
         await Promise.all(selects.map(async (select) => {
           const source = optionSources[select.dataset.optionsFrom];
           if (!source || !source.url()) return;
+          select.dataset.optionsLoaded = 'false';
           try {
             const payload = await jsonRequest(source.url());
             const rows = recordsFrom(payload).filter(source.filter || (() => true));
@@ -725,7 +739,11 @@ function clientScript(canManageAccounts: boolean): string {
               options.push('<option value="' + escapeHtml(value) + '">' + escapeHtml(source.label(row)) + '</option>');
             });
             select.innerHTML = options.join('') || '<option value="">暂无可选项</option>';
+            select.dataset.optionsLoaded = 'true';
+            applyPendingSelectValue(select);
           } catch (_) {
+            select.dataset.optionsLoaded = 'false';
+            select.dataset.ownerSelectionReady = 'false';
             select.innerHTML = '<option value="">列表载入失败</option>';
           }
         }));
@@ -754,7 +772,7 @@ function clientScript(canManageAccounts: boolean): string {
         'source_record_id', 'external_subject', 'vault_ref', 'raw_response_hash',
         'rate_numerator', 'rate_denominator', 'base_currency', 'submission_id'
       ]);
-      // 订阅清单按多维表格 1:1 的列顺序展示；其余集合按动态键补充。
+      // 订阅清单按多维表格 1:1 的列顺序展示；账号资产使用封闭列契约；其余集合按动态键补充。
       const COLLECTION_COLUMN_ORDER = {
         subscriptions: ['name', 'term_effective_start', 'term_effective_end', 'billing_cycle', 'original_currency', 'amount_minor', 'payer_name', 'owner_name', 'auto_renew', 'payment_method_masked', 'notes', 'status', 'settlement_mode', 'billing_anchor_date'],
         accounts: ['display_name', 'asset_identifier', 'account_identifier_masked', 'owner_name', 'status', 'expires_on', 'created_at'],
@@ -806,6 +824,7 @@ function clientScript(canManageAccounts: boolean): string {
       const orderedKeys = (collection, keys) => {
         const order = COLLECTION_COLUMN_ORDER[collection];
         if (!order) return keys;
+        if (collection === 'accounts') return order.filter((key) => keys.includes(key));
         const preferred = order.filter((key) => keys.includes(key));
         const extras = keys.filter((key) => !order.includes(key));
         return preferred.concat(extras);
@@ -1030,11 +1049,14 @@ function clientScript(canManageAccounts: boolean): string {
             if (!accountId) throw new Error('缺少账号资产 ID。');
             url = api.accountOperational.replace(':id', encodeURIComponent(accountId));
             method = 'PUT';
+            const ownerSelect = form.elements.owner_user_id;
+            const includeOwner = ownerSelect.dataset.optionsLoaded === 'true'
+              && ownerSelect.dataset.ownerSelectionReady === 'true';
             payload = {
               display_name: values.display_name,
               account_identifier: values.account_identifier,
               asset_identifier: values.asset_identifier,
-              owner_user_id: values.owner_user_id || null,
+              ...(includeOwner ? { owner_user_id: values.owner_user_id || null } : {}),
               status: values.status,
               expires_on: values.expires_on || null,
               vault_ref: values.vault_ref || null,
@@ -1197,7 +1219,10 @@ function clientScript(canManageAccounts: boolean): string {
           form.elements.display_name.value = row.display_name || '';
           form.elements.account_identifier.value = row.account_identifier_masked || '';
           form.elements.asset_identifier.value = row.asset_identifier || '';
-          form.elements.owner_user_id.value = row.owner_user_id || '';
+          const ownerSelect = form.elements.owner_user_id;
+          ownerSelect.dataset.pendingValue = row.owner_user_id || '';
+          ownerSelect.dataset.ownerSelectionReady = 'false';
+          if (ownerSelect.dataset.optionsLoaded === 'true') applyPendingSelectValue(ownerSelect);
           form.elements.status.value = row.status || 'active';
           form.elements.expires_on.value = row.expires_on || '';
           form.elements.vault_ref.value = row.vault_ref || '';
@@ -1351,7 +1376,11 @@ function clientScript(canManageAccounts: boolean): string {
         applyAccountsFilter();
       };
       document.addEventListener('input', onAccountsFilterChange);
-      document.addEventListener('change', onAccountsFilterChange);` : ''}
+      document.addEventListener('change', (event) => {
+        const ownerSelect = event.target.closest('form[data-api="account-operational"] select[data-options-from="account-owners"]');
+        if (ownerSelect && ownerSelect.dataset.optionsLoaded === 'true') ownerSelect.dataset.ownerSelectionReady = 'true';
+        onAccountsFilterChange(event);
+      });` : ''}
       const renderBarChart = (container, series) => {
         const width = 720;
         const height = 210;

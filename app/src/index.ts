@@ -1006,6 +1006,17 @@ app.get('/api/roles', async (c) => {
   return c.json({ data: roles.results });
 });
 
+app.get('/api/account-owners', async (c) => {
+  const auth = requireRoles(c, DATA_ADMIN_ROLES);
+  if (isResponse(auth)) return auth;
+  const owners = await c.env.DB.prepare(
+    `SELECT user.id, user.display_name, user.email
+     FROM users AS user
+     ORDER BY user.display_name, user.id`,
+  ).all<{ id: string; display_name: string; email: string | null }>();
+  return c.json({ data: owners.results });
+});
+
 app.get('/api/users', async (c) => {
   const auth = requireRoles(c, ['system_admin', 'auditor']);
   if (isResponse(auth)) return auth;

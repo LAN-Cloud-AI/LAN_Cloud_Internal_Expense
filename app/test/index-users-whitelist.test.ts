@@ -165,6 +165,47 @@ describe('payer creation from active employees', () => {
 });
 
 describe('account asset editing', () => {
+  it('gives asset administrators narrow owner options and preserves an omitted owner', async () => {
+    const { app, env, database } = setup();
+    const assetAdminId = await adminSession(app, env, database);
+    database.prepare('DELETE FROM user_roles WHERE user_id = ?').run(assetAdminId);
+    database.prepare("INSERT INTO user_roles (user_id, role_id) VALUES (?, 'role-asset-admin')").run(assetAdminId);
+    database.prepare(
+      `INSERT INTO users (id, external_subject, email, display_name)
+       VALUES ('owner-alpha', 'subject-alpha', 'alpha@example.test', 'Alpha Owner'),
+              ('owner-omega', 'subject-omega', 'omega@example.test', 'Omega Owner')`,
+    ).run();
+
+    const owners = await request(app, env, '/api/account-owners', 'admin');
+    expect(owners.status).toBe(200);
+    const ownerRows = (await owners.json() as { data: Array<Record<string, unknown>> }).data;
+    expect(ownerRows.slice(0, 2)).toEqual([
+      { id: 'owner-alpha', display_name: 'Alpha Owner', email: 'alpha@example.test' },
+      { id: 'owner-omega', display_name: 'Omega Owner', email: 'omega@example.test' },
+    ]);
+    expect(ownerRows.every((row) => Object.keys(row).sort().join(',') === 'display_name,email,id')).toBe(true);
+
+    const users = await request(app, env, '/api/users', 'admin');
+    expect(users.status).toBe(403);
+
+    database.prepare(
+      `INSERT INTO account_assets (id, owner_user_id, account_identifier_masked, display_name)
+       VALUES ('acc-owned', 'owner-alpha', 'masked-account', 'Owned account')`,
+    ).run();
+    const updated = await mutate(app, env, 'PUT', '/api/account-assets/acc-owned', {
+      display_name: 'Renamed account',
+    });
+    expect(updated.status).toBe(200);
+    expect(database.prepare(
+      "SELECT owner_user_id FROM account_assets WHERE id = 'acc-owned'",
+    ).get()).toEqual({ owner_user_id: 'owner-alpha' });
+
+    database.prepare('DELETE FROM user_roles WHERE user_id = ?').run(assetAdminId);
+    database.prepare("INSERT INTO user_roles (user_id, role_id) VALUES (?, 'role-auditor')").run(assetAdminId);
+    const denied = await request(app, env, '/api/account-owners', 'admin');
+    expect(denied.status).toBe(403);
+  });
+
   it('updates name, identifier, owner, expiry and status', async () => {
     const { app, env, database } = setup();
     await adminSession(app, env, database);

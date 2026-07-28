@@ -242,7 +242,7 @@ describe('identity settings and external binding UI', () => {
       principal: { displayName: 'admin@lancloudtech.com', roles: ['system_admin'] },
     });
     expect(ui.UI_API_CONTRACT).not.toHaveProperty('accountFieldDefinitions');
-    expect(accounts).toContain('data-options-from="users"');
+    expect(accounts).toContain('data-options-from="account-owners"');
     expect(accounts).toContain('data-action="toggle-create-account"');
     expect(accounts).toContain('id="account-create-panel" hidden');
     expect(accounts).toContain('name="asset_identifier"');
@@ -259,6 +259,38 @@ describe('identity settings and external binding UI', () => {
     expect(accounts).not.toContain('data-api="account-field-definitions"');
     expect(accounts).not.toContain('字段名称<input name="label"');
     expect(accounts).not.toContain('name="vendor_id"');
+  });
+
+  it('uses the narrow owner-options contract and keeps unresolved account ownership out of updates', () => {
+    expect(ui.UI_API_CONTRACT.accountOwners).toBe('/api/account-owners');
+    const accounts = ui.renderAdminUi({
+      page: 'accounts',
+      principal: { displayName: 'asset-admin@example.test', roles: ['asset_admin'] },
+    });
+
+    expect(accounts).toContain('data-options-from="account-owners"');
+    expect(accounts).not.toContain('data-options-from="users"');
+    expect(accounts).toContain("'account-owners': { url: () => api.accountOwners");
+    expect(accounts).toContain("ownerSelect.dataset.ownerSelectionReady === 'true'");
+    expect(accounts).toContain('...(includeOwner ? { owner_user_id: values.owner_user_id || null } : {})');
+
+    for (const principal of [
+      { displayName: 'auditor@example.test', roles: ['auditor'] },
+      { displayName: 'employee@example.test', roles: ['employee'] },
+    ]) {
+      const readOnly = ui.renderAdminUi({ page: 'accounts', principal });
+      expect(readOnly).not.toContain('/api/account-owners');
+    }
+  });
+
+  it('renders account tables from the exact approved column whitelist', () => {
+    const accounts = ui.renderAdminUi({
+      page: 'accounts',
+      principal: { displayName: 'asset-admin@example.test', roles: ['asset_admin'] },
+    });
+
+    expect(accounts).toContain("accounts: ['display_name', 'asset_identifier', 'account_identifier_masked', 'owner_name', 'status', 'expires_on', 'created_at']");
+    expect(accounts).toContain("if (collection === 'accounts') return order.filter((key) => keys.includes(key));");
   });
 
   it('emits account management controls and script branches only to asset administrators', () => {
