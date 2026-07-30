@@ -645,7 +645,7 @@ function styles(): string {
     .section-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:16px; } .section-heading h2 { margin:0 0 4px; } .section-heading p { font-size:12px; } .action-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; } .action-card { min-height:135px; padding:16px; border:1px solid var(--line); border-radius:12px; color:inherit; text-decoration:none; background:#fbfcff; } .action-card:hover { border-color:#aebffc; transform:translateY(-1px); } .action-card span { color:#657dcf; font-size:11px; font-weight:800; } .action-card strong { display:block; margin:12px 0 4px; } .action-card p { color:var(--muted); font-size:12px; margin-bottom:0; }
     .split-grid { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(280px,.75fr); gap:18px; } .account-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .form-surface form { display:grid; gap:12px; } label { display:grid; gap:5px; color:#404b61; font-size:12px; font-weight:700; } input,select,textarea { border:1px solid #ccd4e2; border-radius:8px; background:#fff; color:var(--ink); font:inherit; font-weight:400; padding:9px 10px; width:100%; outline:none; } input:focus,select:focus,textarea:focus { border-color:#6782e9; box-shadow:0 0 0 3px rgba(77,108,224,.13); } textarea { resize:vertical; } .two-columns { display:grid; grid-template-columns:1fr 1fr; gap:10px; } .form-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:3px; }
     .filter-bar { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin:0 0 12px; }
-    .button { border:1px solid transparent; border-radius:8px; cursor:pointer; font:inherit; font-size:12px; font-weight:750; line-height:1; padding:10px 13px; transition:.15s transform,.15s background; } .button:hover { transform:translateY(-1px); } .button.primary { color:#fff; background:var(--brand); } .button.primary:hover { background:var(--brand-dark); } .button.secondary { color:#34446b; border-color:#cdd5e4; background:#fff; } .button.secondary:hover { background:#f3f5fa; }
+    .button { border:1px solid transparent; border-radius:8px; cursor:pointer; font:inherit; font-size:12px; font-weight:750; line-height:1; padding:10px 13px; transition:.15s transform,.15s background; } .button:hover { transform:translateY(-1px); } .button.primary { color:#fff; background:var(--brand); } .button.primary:hover { background:var(--brand-dark); } .button.secondary { color:#34446b; border-color:#cdd5e4; background:#fff; } .button.secondary:hover { background:#f3f5fa; } .button.danger { color:#fff; background:var(--danger); } .button.danger:hover { background:#9f2e2e; }
     .explain-card { background:linear-gradient(150deg,#fbfcff,#f2f5ff); } .explain-card p,.explain-card li { color:#57637a; } .explain-card ul,.explain-card ol { margin:14px 0 0; padding-left:18px; display:grid; gap:7px; font-size:12px; } .muted { color:var(--muted)!important; font-size:12px; } .notice { border-radius:11px; padding:13px 15px; font-size:13px; } .notice.info { color:#2d4eae; border:1px solid #cbd7ff; background:#edf2ff; } .notice.safety { color:#246343; border:1px solid #b9e5cc; background:#effaf4; }
     .data-panel { border:1px dashed #d3dae6; border-radius:10px; overflow:auto; min-height:102px; max-width:100%; } .empty-state { padding:26px 18px; display:grid; justify-items:start; gap:4px; color:#66738a; } .empty-state strong { color:#34415a; } .empty-state span { font-size:12px; } table { width:100%; border-collapse:collapse; min-width:580px; } th,td { padding:10px 12px; text-align:left; vertical-align:top; border-bottom:1px solid #edf0f5; font-size:12px; white-space:nowrap; } th { color:#697386; background:#f9fafc; font-weight:750; } td { color:#28354d; } td.cell-wrap { white-space:normal; min-width:200px; max-width:360px; word-break:break-word; } tr:last-child td { border-bottom:0; } .pill { display:inline-flex; border-radius:99px; padding:2px 7px; background:#edf1fb; color:#4960aa; font-size:11px; white-space:nowrap; }
     table.sticky-actions th:first-child, table.sticky-actions td:first-child { position:sticky; left:0; z-index:1; background:#fff; box-shadow:8px 0 10px -8px rgba(30,47,80,.22); } table.sticky-actions th:first-child { background:#f9fafc; }
@@ -889,7 +889,7 @@ function clientScript(canManageAccounts: boolean): string {
             return '<td><button class="button secondary" type="button" data-action="delete-whitelist-rule" data-rule-id="' + escapeHtml(row.id) + '">删除</button></td>';
           }
           ${canManageAccounts ? `if (editableAccounts) {
-            return '<td><button class="button secondary" type="button" data-action="edit-account" data-account-id="' + escapeHtml(row.id) + '">编辑</button></td>';
+            return '<td><button class="button secondary" type="button" data-action="edit-account" data-account-id="' + escapeHtml(row.id) + '">编辑</button> <button class="button danger" type="button" data-action="delete-account" data-account-id="' + escapeHtml(row.id) + '" data-account-name="' + escapeHtml(String(row.display_name || '该账号资产')) + '">删除</button></td>';
           }` : ''}
           return '';
         };
@@ -1236,6 +1236,31 @@ function clientScript(canManageAccounts: boolean): string {
             panel.hidden = true;
             const form = panel.querySelector('form');
             if (form) form.reset();
+          }
+          return;
+        }
+        if (action === 'delete-account') {
+          const accountId = button.dataset.accountId;
+          const accountName = button.dataset.accountName || '该账号资产';
+          if (!accountId) return;
+          if (!window.confirm('确定永久删除「' + accountName + '」吗？此操作不可恢复。')) return;
+          button.disabled = true;
+          try {
+            await jsonRequest(
+              api.accountOperational.replace(':id', encodeURIComponent(accountId)),
+              { method: 'DELETE' },
+            );
+            const panel = document.getElementById('account-edit-panel');
+            const form = panel && panel.querySelector('form');
+            if (panel && form && form.elements.account_id.value === accountId) {
+              panel.hidden = true;
+              form.reset();
+            }
+            toast('账号资产已永久删除。');
+            refreshAll();
+          } catch (error) {
+            toast(error.message || '删除失败。');
+            button.disabled = false;
           }
           return;
         }` : ''}

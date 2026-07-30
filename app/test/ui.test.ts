@@ -314,6 +314,13 @@ describe('identity settings and external binding UI', () => {
     expect(assetAdmin).toContain('data-action="toggle-create-account"');
     expect(assetAdmin).toContain('data-action="edit-account"');
     expect(assetAdmin).toContain('data-action="cancel-edit-account"');
+    expect(assetAdmin).toContain('data-action="delete-account"');
+    expect(assetAdmin).toContain('data-account-name');
+    expect(assetAdmin).toContain('class="button danger"');
+    expect(assetAdmin).toContain('确定永久删除「');
+    expect(assetAdmin).toContain("method: 'DELETE'");
+    expect(assetAdmin).toContain("toast('账号资产已永久删除。')");
+    expect(assetAdmin).toContain('form.elements.account_id.value === accountId');
     expect(assetAdmin).toContain('data-api="account-operational"');
     expect(assetAdmin).toContain('api.accountOperational');
     expect(assetAdmin).toContain('/api/account-assets/:id');
@@ -334,6 +341,10 @@ describe('identity settings and external binding UI', () => {
         'data-accounts-filter="asset"',
         'edit-account',
         'cancel-edit-account',
+        'delete-account',
+        'data-account-name',
+        '确定永久删除「',
+        '账号资产已永久删除。',
         'account-operational',
         'api.accountOperational',
         '/api/account-assets/:id',
