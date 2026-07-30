@@ -204,6 +204,22 @@ describe('account asset editing', () => {
     expect(database.prepare("SELECT count(*) AS count FROM audit_events WHERE action = 'delete_account_asset' AND entity_id = 'asset-delete'").get()).toEqual({ count: 1 });
   });
 
+  it('returns one 404 with no duplicate audit when deletion requests race', async () => {
+    const { app, env, database } = setup();
+    await adminSession(app, env, database);
+    database.prepare(
+      "INSERT INTO account_assets (id, account_identifier_masked, display_name, asset_identifier) VALUES ('asset-race', 'race-account', 'Race asset', 'Race service')",
+    ).run();
+
+    const responses = await Promise.all([
+      mutate(app, env, 'DELETE', '/api/account-assets/asset-race'),
+      mutate(app, env, 'DELETE', '/api/account-assets/asset-race'),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 404]);
+    expect(database.prepare("SELECT count(*) AS count FROM account_assets WHERE id = 'asset-race'").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT count(*) AS count FROM audit_events WHERE action = 'delete_account_asset' AND entity_id = 'asset-race'").get()).toEqual({ count: 1 });
+  });
+
   it('allows asset administrators to delete but rejects missing origins and employees', async () => {
     const { app, env, database } = setup();
     const assetAdminId = await adminSession(app, env, database);

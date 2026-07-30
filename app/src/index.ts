@@ -1693,38 +1693,27 @@ app.delete('/api/account-assets/:accountId', async (c) => {
   const auth = requireRoles(c, DATA_ADMIN_ROLES);
   if (isResponse(auth)) return auth;
   const accountId = c.req.param('accountId');
-  const existing = await c.env.DB.prepare(
-    'SELECT id, display_name, asset_identifier, status FROM account_assets WHERE id = ?',
-  ).bind(accountId).first<{
-    id: string;
-    display_name: string;
-    asset_identifier: string;
-    status: string;
-  }>();
-  if (!existing) return problem(c, 404, 'account_asset_not_found', '账号资产不存在。');
-
-  await c.env.DB.batch([
+  const results = await c.env.DB.batch([
     c.env.DB.prepare(
       'DELETE FROM account_field_values WHERE account_asset_id = ?',
     ).bind(accountId),
     c.env.DB.prepare(
-      'DELETE FROM account_assets WHERE id = ?',
-    ).bind(accountId),
-    c.env.DB.prepare(
-      'INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, detail_json) VALUES (?, ?, ?, ?, ?, ?)',
+      `INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, detail_json)
+       SELECT ?, ?, ?, ?, id, json_object('display_name', display_name, 'asset_identifier', asset_identifier, 'status', status)
+       FROM account_assets WHERE id = ?`,
     ).bind(
       crypto.randomUUID(),
       auth.userId,
       'delete_account_asset',
       'account_asset',
       accountId,
-      JSON.stringify({
-        display_name: existing.display_name,
-        asset_identifier: existing.asset_identifier,
-        status: existing.status,
-      }),
     ),
+    c.env.DB.prepare(
+      'DELETE FROM account_assets WHERE id = ?',
+    ).bind(accountId),
   ]);
+  const parentDelete = results[2];
+  if (!parentDelete || parentDelete.meta.changes === 0) return problem(c, 404, 'account_asset_not_found', '账号资产不存在。');
   return c.json({ account_asset_id: accountId, deleted: true });
 });
 
