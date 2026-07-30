@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index';
 import type { AuthenticatedIdentity } from '../src/lib/auth';
 import type { Env } from '../src/lib/types';
-import { sqliteD1 } from './helpers/sqlite-d1';
+import { sqliteD1, withD1StatementFailure } from './helpers/sqlite-d1';
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '../migrations');
 const databases: Database.Database[] = [];
@@ -165,6 +165,94 @@ describe('payer creation from active employees', () => {
 });
 
 describe('account asset editing', () => {
+  it('permanently deletes an asset, its retired field values, and records only safe audit details', async () => {
+    const { app, env, database } = setup();
+    await adminSession(app, env, database);
+    database.prepare(
+      "INSERT INTO users (id, display_name) VALUES ('owner-delete', 'Delete Owner')",
+    ).run();
+    database.prepare(
+      "INSERT INTO account_field_definitions (id, field_key, label, field_type) VALUES ('field-delete', 'legacy_text', 'Legacy text', 'text')",
+    ).run();
+    database.prepare(
+      "INSERT INTO account_assets (id, owner_user_id, account_identifier_masked, display_name, asset_identifier, vault_ref, status) VALUES ('asset-delete', 'owner-delete', 'safe-delete-identifier', '待删除资产', 'Delete Service', 'vault/delete', 'retired')",
+    ).run();
+    database.prepare(
+      "INSERT INTO account_field_values (account_asset_id, field_definition_id, value_text) VALUES ('asset-delete', 'field-delete', 'retired value')",
+    ).run();
+
+    const removed = await mutate(app, env, 'DELETE', '/api/account-assets/asset-delete');
+    expect(removed.status).toBe(200);
+    await expect(removed.json()).resolves.toEqual({ account_asset_id: 'asset-delete', deleted: true });
+    expect(database.prepare("SELECT count(*) AS count FROM account_assets WHERE id = 'asset-delete'").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT count(*) AS count FROM account_field_values WHERE account_asset_id = 'asset-delete'").get()).toEqual({ count: 0 });
+
+    const audit = database.prepare(
+      "SELECT detail_json FROM audit_events WHERE action = 'delete_account_asset' AND entity_id = 'asset-delete'",
+    ).get() as { detail_json: string };
+    expect(JSON.parse(audit.detail_json)).toEqual({
+      display_name: '待删除资产',
+      asset_identifier: 'Delete Service',
+      status: 'retired',
+    });
+    expect(audit.detail_json).not.toContain('safe-delete-identifier');
+    expect(audit.detail_json).not.toContain('owner-delete');
+    expect(audit.detail_json).not.toContain('vault/delete');
+
+    const repeated = await mutate(app, env, 'DELETE', '/api/account-assets/asset-delete');
+    expect(repeated.status).toBe(404);
+    expect(database.prepare("SELECT count(*) AS count FROM audit_events WHERE action = 'delete_account_asset' AND entity_id = 'asset-delete'").get()).toEqual({ count: 1 });
+  });
+
+  it('allows asset administrators to delete but rejects missing origins and employees', async () => {
+    const { app, env, database } = setup();
+    const assetAdminId = await adminSession(app, env, database);
+    database.prepare('DELETE FROM user_roles WHERE user_id = ?').run(assetAdminId);
+    database.prepare("INSERT INTO user_roles (user_id, role_id) VALUES (?, 'role-asset-admin')").run(assetAdminId);
+    database.prepare(
+      "INSERT INTO account_assets (id, account_identifier_masked, display_name) VALUES ('asset-admin-delete', 'admin-delete-account', 'Asset admin delete'), ('asset-no-origin', 'origin-account', 'Origin protected'), ('asset-employee-delete', 'employee-account', 'Employee protected')",
+    ).run();
+
+    const allowed = await mutate(app, env, 'DELETE', '/api/account-assets/asset-admin-delete');
+    expect(allowed.status).toBe(200);
+
+    const noOrigin = await request(app, env, '/api/account-assets/asset-no-origin', 'admin', { method: 'DELETE' });
+    expect(noOrigin.status).toBe(403);
+    expect(database.prepare("SELECT count(*) AS count FROM account_assets WHERE id = 'asset-no-origin'").get()).toEqual({ count: 1 });
+
+    database.prepare('DELETE FROM user_roles WHERE user_id = ?').run(assetAdminId);
+    database.prepare("INSERT INTO user_roles (user_id, role_id) VALUES (?, 'role-employee')").run(assetAdminId);
+    const denied = await mutate(app, env, 'DELETE', '/api/account-assets/asset-employee-delete');
+    expect(denied.status).toBe(403);
+    expect(database.prepare("SELECT count(*) AS count FROM account_assets WHERE id = 'asset-employee-delete'").get()).toEqual({ count: 1 });
+  });
+
+  it('rolls back account asset deletion when its audit write fails', async () => {
+    const { app, env, database } = setup();
+    await adminSession(app, env, database);
+    database.prepare(
+      "INSERT INTO account_field_definitions (id, field_key, label, field_type) VALUES ('field-rollback', 'legacy_text', 'Legacy text', 'text')",
+    ).run();
+    database.prepare(
+      "INSERT INTO account_assets (id, account_identifier_masked, display_name) VALUES ('asset-rollback', 'rollback-account', 'Rollback asset')",
+    ).run();
+    database.prepare(
+      "INSERT INTO account_field_values (account_asset_id, field_definition_id, value_text) VALUES ('asset-rollback', 'field-rollback', 'retired value')",
+    ).run();
+    env.DB = withD1StatementFailure(
+      sqliteD1(database),
+      (query) => query.includes('INSERT INTO audit_events'),
+    );
+
+    const failed = await mutate(app, env, 'DELETE', '/api/account-assets/asset-rollback');
+    expect(failed.status).toBe(500);
+    const body = await failed.json() as { error: { code: string } };
+    expect(body.error.code).toBe('internal_error');
+    expect(database.prepare("SELECT count(*) AS count FROM account_assets WHERE id = 'asset-rollback'").get()).toEqual({ count: 1 });
+    expect(database.prepare("SELECT count(*) AS count FROM account_field_values WHERE account_asset_id = 'asset-rollback'").get()).toEqual({ count: 1 });
+    expect(database.prepare("SELECT count(*) AS count FROM audit_events WHERE action = 'delete_account_asset' AND entity_id = 'asset-rollback'").get()).toEqual({ count: 0 });
+  });
+
   it('gives asset administrators narrow owner options and preserves an omitted owner', async () => {
     const { app, env, database } = setup();
     const assetAdminId = await adminSession(app, env, database);
