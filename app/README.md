@@ -98,7 +98,7 @@
 
 接口未启用或用户没有角色时，页面显示安全的空状态/错误消息，不把底层错误或密钥输出给浏览器。
 
-账号资产的 `asset_identifier` 是固定字段，创建时必填、编辑时可更新，并用于账号资产清单的筛选和展示。动态追加字段功能已退役：`GET/POST /api/account-field-definitions` 与 `PUT /api/account-assets/:id/field-values` 固定返回 `410 Gone`；常规情况下历史表只读保留，既不读取、创建也不编辑。仅 `system_admin` 与 `asset_admin` 可永久删除账号资产：系统会先删除该资产的 `account_field_values`，再删除资产，并写入不含账号标识、归属人员或 `vault_ref` 的审计事件；审计仅保留安全元数据，绝不记录凭据。此功能不需要新的 D1 migration，且当前仓库不以本文宣称已完成生产部署。
+账号资产的 `asset_identifier` 是固定字段，创建时必填、编辑时可更新，并用于账号资产清单的筛选和展示。动态追加字段功能已退役：`GET/POST /api/account-field-definitions` 与 `PUT /api/account-assets/:id/field-values` 固定返回 `410 Gone`；常规情况下历史表只读保留，既不读取、创建也不编辑。仅 `system_admin` 与 `asset_admin` 可永久删除账号资产：系统会先删除该资产的 `account_field_values`，再删除资产；`account_field_definitions` 会保留，且绝不会作为资产删除的一部分被删除。系统写入的审计事件不含账号标识、归属人员或 `vault_ref`；审计仅保留安全元数据，绝不记录凭据。此功能不需要新的 D1 migration，且当前仓库不以本文宣称已完成生产部署。
 
 ## 无服务器边界与运维注意事项
 
