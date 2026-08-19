@@ -1455,7 +1455,7 @@ app.post('/api/subscriptions', async (c) => {
   }
   await c.env.DB.batch(statements);
   await appendAudit(c.env, auth.userId, 'create_subscription', 'subscription', id, { name });
-  await regenerateCandidatesForSubscription(c.env, id, fetcher);
+  await continueAfterResponse(c, regenerateCandidatesForSubscription(c.env, id, fetcher));
   return c.json({ subscription_id: id }, 201);
 });
 
@@ -1632,7 +1632,7 @@ app.put('/api/subscriptions/:subscriptionId/operational', async (c) => {
     ...(termChanged ? { term_changed: true } : {}),
     ...(payerChanged ? { payer_changed: true } : {}),
   });
-  await regenerateCandidatesForSubscription(c.env, subscriptionId, fetcher);
+  await continueAfterResponse(c, regenerateCandidatesForSubscription(c.env, subscriptionId, fetcher));
   return c.json({ subscription_id: subscriptionId, auto_renew: autoRenew, term_changed: termChanged, payer_changed: payerChanged });
 });
 
@@ -1673,7 +1673,7 @@ app.post('/api/subscriptions/:subscriptionId/term-versions', async (c) => {
     subscription_id: c.req.param('subscriptionId'),
     effective_start: effectiveStart,
   });
-  await regenerateCandidatesForSubscription(c.env, c.req.param('subscriptionId'), fetcher);
+  await continueAfterResponse(c, regenerateCandidatesForSubscription(c.env, c.req.param('subscriptionId'), fetcher));
   return c.json({ term_version_id: id }, 201);
 });
 
@@ -1694,7 +1694,7 @@ app.post('/api/subscriptions/:subscriptionId/payer-assignments', async (c) => {
     subscription_id: c.req.param('subscriptionId'),
     payer_id: payerId,
   });
-  await regenerateCandidatesForSubscription(c.env, c.req.param('subscriptionId'), fetcher);
+  await continueAfterResponse(c, regenerateCandidatesForSubscription(c.env, c.req.param('subscriptionId'), fetcher));
   return c.json({ payer_assignment_id: id }, 201);
 });
 
@@ -2125,6 +2125,20 @@ async function regenerateCandidatesForSubscription(env: Env, subscriptionId: str
   } catch {
     // 生成失败留给每日 Cron 兜底，不能让订阅变更请求失败。
   }
+}
+
+/** 生产用 waitUntil 避免创建/编辑被汇率抓取拖住；测试没有 ExecutionContext 时仍等待完成。 */
+function continueAfterResponse(c: AppContext, work: Promise<unknown>): Promise<unknown> | void {
+  try {
+    const ctx = c.executionCtx;
+    if (ctx && typeof ctx.waitUntil === 'function') {
+      ctx.waitUntil(work);
+      return;
+    }
+  } catch {
+    // Hono app.request 测试没有 ExecutionContext
+  }
+  return work;
 }
 
 app.post('/api/reimbursements/generate-candidates', async (c) => {

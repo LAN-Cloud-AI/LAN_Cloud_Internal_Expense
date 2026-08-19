@@ -289,6 +289,7 @@ function subscriptionsPage(employeeOnly = false): string {
         <label>备注（可选）<textarea name="notes" rows="2" maxlength="2000" placeholder="不填写密码、卡号或验证码"></textarea></label>
         <label><span>自动续费</span><select name="auto_renew"><option value="false">否</option><option value="true">是</option></select></label>
         <div class="form-actions"><button class="button primary" type="submit">创建订阅</button></div>
+        <div class="action-result" data-form-result aria-live="polite"></div>
       </form>
     </article>
     <article class="surface explain-card">
@@ -654,7 +655,7 @@ function styles(): string {
     .topbar-side { display:flex; align-items:center; gap:14px; } .logout-link { flex:none; color:var(--muted); font-size:12px; text-decoration:none; border:1px solid var(--line); border-radius:8px; background:#fff; padding:7px 11px; } .logout-link:hover { color:var(--ink); border-color:#c3cbda; }
     .page-content { display:grid; gap:18px; max-width:1400px; min-width:0; } .surface { background:var(--surface); border:1px solid var(--line); border-radius:15px; box-shadow:var(--shadow); padding:20px; min-width:0; max-width:100%; } .split-grid > *, .account-grid > *, .metric-grid > * { min-width:0; } .metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; } .metric { min-height:118px; padding:16px; background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); display:flex; flex-direction:column; } .metric p { color:var(--muted); margin:0 0 12px; font-size:12px; } .metric strong { font-size:26px; letter-spacing:-.03em; overflow-wrap:anywhere; } .metric small { margin-top:auto; color:var(--muted); font-size:11px; } .metric.accent { border-color:#c7d4ff; background:#fbfcff; } .metric.warning { border-color:#ffe2ac; background:#fffdfa; } .metric.neutral { background:#fafbfc; }
     .section-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:16px; } .section-heading h2 { margin:0 0 4px; } .section-heading p { font-size:12px; } .action-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; } .action-card { min-height:135px; padding:16px; border:1px solid var(--line); border-radius:12px; color:inherit; text-decoration:none; background:#fbfcff; } .action-card:hover { border-color:#aebffc; transform:translateY(-1px); } .action-card span { color:#657dcf; font-size:11px; font-weight:800; } .action-card strong { display:block; margin:12px 0 4px; } .action-card p { color:var(--muted); font-size:12px; margin-bottom:0; }
-    .split-grid { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(280px,.75fr); gap:18px; } .account-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .form-surface form { display:grid; gap:12px; } label { display:grid; gap:5px; color:#404b61; font-size:12px; font-weight:700; } input,select,textarea { border:1px solid #ccd4e2; border-radius:8px; background:#fff; color:var(--ink); font:inherit; font-weight:400; padding:9px 10px; width:100%; outline:none; } input:focus,select:focus,textarea:focus { border-color:#6782e9; box-shadow:0 0 0 3px rgba(77,108,224,.13); } textarea { resize:vertical; } .two-columns { display:grid; grid-template-columns:1fr 1fr; gap:10px; } .form-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:3px; }
+    .split-grid { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(280px,.75fr); gap:18px; } .account-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .form-surface form { display:grid; gap:12px; } label { display:grid; gap:5px; color:#404b61; font-size:12px; font-weight:700; } input,select,textarea { border:1px solid #ccd4e2; border-radius:8px; background:#fff; color:var(--ink); font:inherit; font-weight:400; padding:9px 10px; width:100%; outline:none; } input:focus,select:focus,textarea:focus { border-color:#6782e9; box-shadow:0 0 0 3px rgba(77,108,224,.13); } textarea { resize:vertical; } .two-columns { display:grid; grid-template-columns:1fr 1fr; gap:10px; } .form-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:3px; } .button:disabled { opacity:.65; cursor:not-allowed; transform:none; } .button.primary:disabled:hover { background:var(--brand); }
     .filter-bar { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin:0 0 12px; }
     .button { border:1px solid transparent; border-radius:8px; cursor:pointer; font:inherit; font-size:12px; font-weight:750; line-height:1; padding:10px 13px; transition:.15s transform,.15s background; } .button:hover { transform:translateY(-1px); } .button.primary { color:#fff; background:var(--brand); } .button.primary:hover { background:var(--brand-dark); } .button.secondary { color:#34446b; border-color:#cdd5e4; background:#fff; } .button.secondary:hover { background:#f3f5fa; } .button.danger { color:#fff; background:var(--danger); } .button.danger:hover { background:#9f2e2e; }
     .explain-card { background:linear-gradient(150deg,#fbfcff,#f2f5ff); } .explain-card p,.explain-card li { color:#57637a; } .explain-card ul,.explain-card ol { margin:14px 0 0; padding-left:18px; display:grid; gap:7px; font-size:12px; } .muted { color:var(--muted)!important; font-size:12px; } .notice { border-radius:11px; padding:13px 15px; font-size:13px; } .notice.info { color:#2d4eae; border:1px solid #cbd7ff; background:#edf2ff; } .notice.safety { color:#246343; border:1px solid #b9e5cc; background:#effaf4; }
@@ -1087,6 +1088,27 @@ function clientScript(canManageAccounts: boolean): string {
       const reimbursementPayload = () => ({ candidate_ids: candidateIds() });
       document.querySelectorAll('form[data-api]').forEach((form) => form.addEventListener('submit', async (event) => {
         event.preventDefault();
+        if (form.dataset.submitting === 'true') return;
+        form.dataset.submitting = 'true';
+        const submitButtons = Array.from(form.querySelectorAll('button[type="submit"]'));
+        const setSubmitBusy = (busy, label) => {
+          submitButtons.forEach((button) => {
+            if (busy) {
+              if (!button.dataset.idleLabel) button.dataset.idleLabel = button.textContent;
+              button.disabled = true;
+              button.textContent = label;
+            } else {
+              button.disabled = false;
+              if (button.dataset.idleLabel) button.textContent = button.dataset.idleLabel;
+            }
+          });
+        };
+        const resultEl = form.querySelector('[data-form-result]');
+        const setFormResult = (kind, message) => {
+          if (!resultEl) return;
+          resultEl.className = 'action-result ' + (kind || '');
+          resultEl.textContent = message;
+        };
         const endpointKey = form.dataset.api;
         const formData = new FormData(form);
         const values = Object.fromEntries(formData.entries());
@@ -1187,12 +1209,39 @@ function clientScript(canManageAccounts: boolean): string {
               ...(term ? { term } : {}),
             };
           }
-          if (!url) return toast('该表单尚未绑定 API。');
+          if (!url) {
+            form.dataset.submitting = '';
+            return toast('该表单尚未绑定 API。');
+          }
+          const pendingLabel = endpointKey === 'subscriptions' ? '正在创建…' : '正在保存…';
+          const pendingToast = endpointKey === 'subscriptions' ? '正在创建订阅，请稍候…' : '正在保存，请稍候…';
+          setSubmitBusy(true, pendingLabel);
+          setFormResult('', pendingToast);
+          toast(pendingToast);
           await jsonRequest(url, { method, headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(payload) });
           form.reset();
-          toast(form.dataset.success || '已保存。');
+          if (endpointKey === 'subscriptions') {
+            const panel = document.getElementById('subscription-create-panel');
+            const toggle = document.querySelector('[data-action="toggle-create-subscription"]');
+            if (panel) panel.hidden = true;
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+          }
+          if (endpointKey === 'subscription-operational') {
+            const panel = document.getElementById('subscription-edit-panel');
+            if (panel) panel.hidden = true;
+          }
+          const success = form.dataset.success || '已保存。';
+          setFormResult('success', success);
+          toast(success);
           refreshAll();
-        } catch (error) { toast(error.message || '保存失败。'); }
+        } catch (error) {
+          const message = error.message || '保存失败。';
+          setFormResult('error', message);
+          toast(message);
+        } finally {
+          form.dataset.submitting = '';
+          setSubmitBusy(false);
+        }
       }));
       document.addEventListener('click', async (event) => {
         const button = event.target.closest('[data-action]');

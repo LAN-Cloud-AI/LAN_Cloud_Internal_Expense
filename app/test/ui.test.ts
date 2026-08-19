@@ -193,6 +193,10 @@ describe('identity settings and external binding UI', () => {
     expect(html).toContain('name="amount"');
     expect(html).toContain('name="billing_cycle"');
     expect(html).toContain('value="semi_annual">半年付');
+    expect(html).toContain('data-form-result');
+    expect(html).toContain("form.dataset.submitting === 'true'");
+    expect(html).toContain('正在创建订阅，请稍候…');
+    expect(html).toContain('.button:disabled { opacity:.65; cursor:not-allowed; transform:none; }');
     expect(html).toContain('name="effective_start"');
     expect(html).toContain('name="term_effective_end"');
     expect(html).toContain('name="payer_user_id"');
