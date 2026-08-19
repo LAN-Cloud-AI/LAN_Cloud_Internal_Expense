@@ -111,19 +111,6 @@ function insertItem(
 }
 
 describe('报销账本完整性约束', () => {
-  it('订阅周期允许半年付，且月付季付半年付年付均按整期入账约束', () => {
-    const database = createDatabase();
-    database.prepare(
-      `UPDATE subscription_term_versions SET billing_cycle = 'semi_annual' WHERE id = 'term-1'`,
-    ).run();
-    expect(database.prepare(`SELECT billing_cycle FROM subscription_term_versions WHERE id = 'term-1'`).get()).toMatchObject({
-      billing_cycle: 'semi_annual',
-    });
-    expect(() =>
-      database.prepare("UPDATE subscription_term_versions SET billing_cycle = 'weekly' WHERE id = 'term-1'").run(),
-    ).toThrow();
-  });
-
   it('订阅的自动续费标记只能是布尔值，付款方式与备注属于可变主数据', () => {
     const database = createDatabase();
     database.prepare(

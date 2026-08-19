@@ -94,7 +94,6 @@ describe('cycle boundaries', () => {
   it('treats 2026-08-21 through 2026-09-20 as one monthly cycle', () => {
     expect(nextCycleStart('2026-08-21', 'monthly')).toBe('2026-09-21');
     expect(nextCycleStart('2026-08-21', 'quarterly')).toBe('2026-11-21');
-    expect(nextCycleStart('2026-08-21', 'semi_annual')).toBe('2027-02-21');
     expect(nextCycleStart('2026-08-21', 'yearly')).toBe('2027-08-21');
   });
 

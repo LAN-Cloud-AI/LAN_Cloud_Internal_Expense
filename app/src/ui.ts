@@ -277,7 +277,7 @@ function subscriptionsPage(employeeOnly = false): string {
           <label>币种<select name="original_currency"><option>CNY</option><option>USD</option><option>EUR</option><option>HKD</option><option>JPY</option><option>GBP</option><option>SGD</option><option>AUD</option><option>CAD</option><option>CHF</option><option>KRW</option></select></label>
         </div>
         <div class="two-columns">
-          <label>订阅周期<select name="billing_cycle"><option value="">不设置</option><option value="monthly">月付</option><option value="quarterly">季付</option><option value="semi_annual">半年付</option><option value="yearly">年付</option><option value="one_time">一次性</option></select></label>
+          <label>订阅周期<select name="billing_cycle"><option value="">不设置</option><option value="monthly">月付</option><option value="quarterly">季付</option><option value="yearly">年付</option><option value="one_time">一次性</option></select></label>
           <label>付款者（在职员工，可选）<select name="payer_user_id" data-options-from="active-users"><option value="">正在载入员工…</option></select></label>
         </div>
         <div class="two-columns">
@@ -296,7 +296,7 @@ function subscriptionsPage(employeeOnly = false): string {
       <h2>条款与付款者均有有效期</h2>
       <p>每一笔候选费用都会复制当时的价格、原币金额、汇率和付款者。历史报销不会因今天改价、换卡或换人而变动。</p>
       <ul>
-        <li>周期：月付、季付、半年付、年付、一次性；从生效日起整期一次性入账</li>
+        <li>周期：月付、季付、年付、一次性；从生效日起整期一次性入账</li>
         <li>结算：账期开始当天计入一整期，不按天摊销</li>
         <li>续费：作为订阅属性记录并在到期前提醒</li>
       </ul>
@@ -319,7 +319,7 @@ function subscriptionsPage(employeeOnly = false): string {
         <label>币种<select name="original_currency"><option>CNY</option><option>USD</option><option>EUR</option><option>HKD</option><option>JPY</option><option>GBP</option><option>SGD</option><option>AUD</option><option>CAD</option><option>CHF</option><option>KRW</option></select></label>
       </div>
       <div class="two-columns">
-        <label>订阅周期<select name="billing_cycle"><option value="monthly">月付</option><option value="quarterly">季付</option><option value="semi_annual">半年付</option><option value="yearly">年付</option><option value="one_time">一次性</option></select></label>
+        <label>订阅周期<select name="billing_cycle"><option value="monthly">月付</option><option value="quarterly">季付</option><option value="yearly">年付</option><option value="one_time">一次性</option></select></label>
         <label>生效开始日期<input name="effective_start" type="date" /></label>
       </div>
       <div class="two-columns">
@@ -818,7 +818,7 @@ function clientScript(canManageAccounts: boolean): string {
         }
         return row;
       };
-      const CYCLE_LABELS = { monthly: '月付', quarterly: '季付', semi_annual: '半年付', yearly: '年付', one_time: '一次性' };
+      const CYCLE_LABELS = { monthly: '月付', quarterly: '季付', yearly: '年付', one_time: '一次性' };
       const SETTLEMENT_LABELS = { actual_bill: '一次性结算', accrual: '按天摊销' };
       const STATUS_LABELS = {
         subscriptions: { active: '有效', paused: '暂停', ended: '已结束' },
