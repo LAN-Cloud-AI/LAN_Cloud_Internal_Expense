@@ -204,6 +204,15 @@ function emptyCollection(id: string, label: string): string {
   </div>`;
 }
 
+function subscriptionsFilterBar(): string {
+  return `<div class="filter-bar" id="subscriptions-filter">
+      <select data-subscriptions-filter="status"><option value="">全部状态</option><option value="active">有效</option><option value="paused">暂停</option><option value="ended">已结束</option></select>
+      <select data-subscriptions-filter="owner"><option value="">全部使用者</option></select>
+      <select data-subscriptions-filter="payer"><option value="">全部付款者</option></select>
+      <input data-subscriptions-filter="q" placeholder="搜索名称、备注或付款方式" maxlength="80" />
+    </div>`;
+}
+
 function employeeDashboardPage(): string {
   return `<section class="metric-grid employee-metric-grid">
     ${card('我的订阅', '—', '仅统计归属自己的订阅资产')}
@@ -250,7 +259,8 @@ function dashboardPage(employeeOnly = false): string {
 function subscriptionsPage(employeeOnly = false): string {
   if (employeeOnly) {
     return `<section class="surface">
-      ${sectionHeading('订阅清单', '仅显示归属自己的订阅资产。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+      ${sectionHeading('订阅清单', '可按状态、使用者和付款者筛选；仅显示归属自己的订阅资产。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+      ${subscriptionsFilterBar()}
       ${emptyCollection('subscriptions', '订阅')}
     </section>`;
   }
@@ -330,7 +340,8 @@ function subscriptionsPage(employeeOnly = false): string {
     <div class="action-result" id="subscription-edit-result" aria-live="polite"></div>
   </section>
   <section class="surface">
-    ${sectionHeading('订阅清单', '可按状态、使用者和付款者查看；原始导入数据保持可追溯。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${sectionHeading('订阅清单', '可按状态、使用者和付款者筛选；原始导入数据保持可追溯。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${subscriptionsFilterBar()}
     ${emptyCollection('subscriptions', '订阅')}
   </section>`;
 }
@@ -846,6 +857,7 @@ function clientScript(canManageAccounts: boolean): string {
         return String(value);
       };
       const collectionRows = {};
+      const subscriptionsFilterState = { status: '', owner: '', payer: '', q: '' };
       ${canManageAccounts ? "const accountsFilterState = { owner: '', asset: '', status: '', q: '' };" : ''}
       const WRAPPABLE_COLUMNS = new Set(['notes', 'detail_json', 'summary_json', 'account_identifier_masked']);
       const cellTag = (key, content) => '<td' + (WRAPPABLE_COLUMNS.has(key) ? ' class="cell-wrap"' : '') + '>' + content + '</td>';
@@ -907,6 +919,52 @@ function clientScript(canManageAccounts: boolean): string {
         }).join('') : body;
         panel.innerHTML = '<table' + (hasActions ? ' class="sticky-actions"' : '') + '><thead><tr>' + head + '</tr></thead><tbody>' + candidateBody + '</tbody></table>';
       };
+      const uniqueNamedOptions = (rows, idKey, nameKey) => {
+        const seen = new Map();
+        rows.forEach((row) => {
+          const value = row && typeof row[idKey] === 'string' ? row[idKey] : '';
+          const label = row && typeof row[nameKey] === 'string' ? row[nameKey].trim() : '';
+          if (!value || seen.has(value)) return;
+          seen.set(value, label || value);
+        });
+        return Array.from(seen.entries())
+          .map(([value, label]) => ({ value, label }))
+          .sort((left, right) => left.label.localeCompare(right.label, 'zh-CN'));
+      };
+      const fillFilterSelect = (attr, values, allLabel, currentValue) => {
+        const select = document.querySelector('[data-subscriptions-filter="' + attr + '"]');
+        if (!select) return '';
+        select.innerHTML = '<option value="">' + allLabel + '</option>' + values
+          .map((item) => '<option value="' + escapeHtml(item.value) + '">' + escapeHtml(item.label) + '</option>')
+          .join('');
+        if (values.some((item) => item.value === currentValue)) {
+          select.value = currentValue;
+          return currentValue;
+        }
+        return '';
+      };
+      const applySubscriptionsFilter = () => {
+        const panel = document.querySelector('[data-collection="subscriptions"]');
+        if (!panel) return;
+        const all = collectionRows.subscriptions || [];
+        const rows = all.filter((row) => {
+          if (subscriptionsFilterState.status && row && row.status !== subscriptionsFilterState.status) return false;
+          if (subscriptionsFilterState.owner && row && row.owner_user_id !== subscriptionsFilterState.owner) return false;
+          if (subscriptionsFilterState.payer && row && row.payer_id !== subscriptionsFilterState.payer) return false;
+          if (subscriptionsFilterState.q) {
+            const hay = (
+              String((row && row.name) || '') + ' ' +
+              String((row && row.notes) || '') + ' ' +
+              String((row && row.payment_method_masked) || '') + ' ' +
+              String((row && row.owner_name) || '') + ' ' +
+              String((row && row.payer_name) || '')
+            ).toLowerCase();
+            if (!hay.includes(subscriptionsFilterState.q.toLowerCase())) return false;
+          }
+          return true;
+        });
+        renderRowsInto(panel, rows, all.length);
+      };
       ${canManageAccounts ? `const applyAccountsFilter = () => {
         const panel = document.querySelector('[data-collection="accounts"]');
         if (!panel) return;
@@ -930,6 +988,11 @@ function clientScript(canManageAccounts: boolean): string {
       const renderCollection = (panel, payload) => {
         const rows = recordsFrom(payload);
         collectionRows[panel.dataset.collection] = rows;
+        if (panel.dataset.collection === 'subscriptions') {
+          subscriptionsFilterState.owner = fillFilterSelect('owner', uniqueNamedOptions(rows, 'owner_user_id', 'owner_name'), '全部使用者', subscriptionsFilterState.owner);
+          subscriptionsFilterState.payer = fillFilterSelect('payer', uniqueNamedOptions(rows, 'payer_id', 'payer_name'), '全部付款者', subscriptionsFilterState.payer);
+          return applySubscriptionsFilter();
+        }
         if (panel.dataset.collection === 'accounts') {
           ${canManageAccounts ? `
           const assetValues = Array.from(new Set(rows
@@ -1166,7 +1229,9 @@ function clientScript(canManageAccounts: boolean): string {
           form.elements.name.value = row.name || '';
           form.elements.owner_user_id.value = row.owner_user_id || '';
           form.elements.payer_user_id.value = row.payer_owner_user_id || '';
-          form.elements.amount.value = typeof row.amount_minor === 'number' ? (row.amount_minor / 100).toFixed(2) : '';
+          form.elements.amount.value = row.amount_minor == null || row.amount_minor === ''
+            ? ''
+            : (Number(row.amount_minor) / 100).toFixed(2);
           form.elements.original_currency.value = row.original_currency || '';
           form.elements.billing_cycle.value = row.billing_cycle || 'monthly';
           form.elements.effective_start.value = row.term_effective_start || '';
@@ -1394,6 +1459,14 @@ function clientScript(canManageAccounts: boolean): string {
           return;
         }
       });
+      const onSubscriptionsFilterChange = (event) => {
+        const el = event.target.closest('[data-subscriptions-filter]');
+        if (!el) return;
+        subscriptionsFilterState[el.dataset.subscriptionsFilter] = el.value;
+        applySubscriptionsFilter();
+      };
+      document.addEventListener('input', onSubscriptionsFilterChange);
+      document.addEventListener('change', onSubscriptionsFilterChange);
       ${canManageAccounts ? `const onAccountsFilterChange = (event) => {
         const el = event.target.closest('[data-accounts-filter]');
         if (!el) return;

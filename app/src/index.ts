@@ -1217,6 +1217,9 @@ app.post('/api/payers', async (c) => {
 app.get('/api/subscriptions', async (c) => {
   const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer', 'employee']);
   if (isResponse(auth)) return auth;
+  // 清单优先展示「今天仍覆盖」的条款；若条款已截止但仍有历史版本，回退到最近一条，
+  // 避免资产仍有效、价格已录入却因 effective_end 过期显示为空。业务日用上海时区，不用 UTC date('now')。
+  const today = shanghaiBusinessDate();
   let sql = `SELECT DISTINCT
       subscription.id, subscription.name, subscription.status, subscription.owner_user_id,
       subscription.auto_renew, subscription.payment_method_masked, subscription.notes,
@@ -1229,18 +1232,29 @@ app.get('/api/subscriptions', async (c) => {
     FROM subscriptions AS subscription
     LEFT JOIN users AS owner ON owner.id = subscription.owner_user_id
     LEFT JOIN subscription_term_versions AS term
-      ON term.subscription_id = subscription.id
-      AND term.effective_start <= date('now')
-      AND (term.effective_end IS NULL OR term.effective_end >= date('now'))
+      ON term.id = (
+        SELECT candidate.id
+        FROM subscription_term_versions AS candidate
+        WHERE candidate.subscription_id = subscription.id
+        ORDER BY
+          CASE
+            WHEN candidate.effective_start <= ?
+              AND (candidate.effective_end IS NULL OR candidate.effective_end >= ?)
+            THEN 0
+            ELSE 1
+          END,
+          candidate.effective_start DESC
+        LIMIT 1
+      )
     LEFT JOIN payer_assignments AS assignment
       ON assignment.subscription_id = subscription.id AND assignment.effective_end IS NULL
     LEFT JOIN payers AS payer ON payer.id = assignment.payer_id`;
   let statement: D1PreparedStatement;
   if (isGlobalReader(auth)) {
-    statement = c.env.DB.prepare(`${sql} ORDER BY subscription.name`);
+    statement = c.env.DB.prepare(`${sql} ORDER BY subscription.name`).bind(today, today);
   } else {
     // 员工自助范围：归属自己使用的订阅，或付款者是自己的订阅。
-    statement = c.env.DB.prepare(`${sql} WHERE (subscription.owner_user_id = ? OR payer.owner_user_id = ?) ORDER BY subscription.name`).bind(auth.userId, auth.userId);
+    statement = c.env.DB.prepare(`${sql} WHERE (subscription.owner_user_id = ? OR payer.owner_user_id = ?) ORDER BY subscription.name`).bind(today, today, auth.userId, auth.userId);
   }
   const subscriptions = await statement.all();
   return c.json({ data: subscriptions.results });

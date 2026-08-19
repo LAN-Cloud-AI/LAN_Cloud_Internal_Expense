@@ -45,6 +45,16 @@ describe('identity settings and external binding UI', () => {
     expect(navigation).not.toContain('人员与权限');
     expect(html).not.toContain('维护订阅条款');
     expect(html).not.toContain('生成报销草稿');
+    const employeeSubscriptions = ui.renderAdminUi({
+      page: 'subscriptions',
+      principal: { displayName: 'employee@lancloudtech.com', roles: ['employee'] },
+    });
+    expect(employeeSubscriptions).toContain('id="subscriptions-filter"');
+    expect(employeeSubscriptions).toContain('data-subscriptions-filter="status"');
+    expect(employeeSubscriptions).toContain('data-subscriptions-filter="owner"');
+    expect(employeeSubscriptions).toContain('data-subscriptions-filter="payer"');
+    expect(employeeSubscriptions).toContain('data-subscriptions-filter="q"');
+    expect(employeeSubscriptions).not.toContain('id="subscription-create-panel"');
     expect(html).not.toContain('/api/exchange-rates');
     expect(html).toContain('我的待报销');
     expect(html).toContain('进行中报销');
@@ -193,6 +203,14 @@ describe('identity settings and external binding UI', () => {
     expect(html).toContain("owner_name: '归属人员'");
     expect(html).toContain('HIDDEN_COLUMNS');
     expect(html).toContain('form.elements.owner_user_id.value');
+    expect(html).toContain('id="subscriptions-filter"');
+    expect(html).toContain('data-subscriptions-filter="status"');
+    expect(html).toContain('data-subscriptions-filter="owner"');
+    expect(html).toContain('data-subscriptions-filter="payer"');
+    expect(html).toContain('data-subscriptions-filter="q"');
+    expect(html).toContain('applySubscriptionsFilter');
+    expect(html).toContain("uniqueNamedOptions(rows, 'owner_user_id', 'owner_name')");
+    expect(html).toContain("uniqueNamedOptions(rows, 'payer_id', 'payer_name')");
   });
 
   it('renders the read-only auto-FX page without manual rate entry', () => {
@@ -235,6 +253,7 @@ describe('identity settings and external binding UI', () => {
     expect(subscriptions).not.toContain('data-options-from="payers"');
     expect(subscriptions).toContain('data-action="toggle-create-subscription"');
     expect(subscriptions).toContain('id="subscription-create-panel" hidden');
+    expect(subscriptions).toContain('id="subscriptions-filter"');
     expect(subscriptions).not.toContain('name="vendor_id"');
 
     const accounts = ui.renderAdminUi({

@@ -154,6 +154,53 @@ describe('subscription operational editing', () => {
     expect(row.owner_user_id).toBeNull();
   });
 
+  it('still lists amount_minor after the latest term effective_end has passed', async () => {
+    const { app, env, database } = setup();
+    await adminSession(app, env, database);
+    seedSubscription(database);
+    // 用远早于任何合理「今天」的窗口，避免测试依赖机器日期。
+    database.prepare(
+      `UPDATE subscription_term_versions
+       SET effective_start = '2000-01-01', billing_anchor_date = '2000-01-01', effective_end = '2000-12-31'
+       WHERE id = 'term-1'`,
+    ).run();
+
+    const list = await request(app, env, '/api/subscriptions');
+    const body = await list.json() as { data: Array<Record<string, unknown>> };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]).toMatchObject({
+      name: 'Figma 企业版',
+      amount_minor: 20000,
+      original_currency: 'USD',
+      term_effective_start: '2000-01-01',
+      term_effective_end: '2000-12-31',
+    });
+  });
+
+  it('prefers the currently effective term over a newer but still future term', async () => {
+    const { app, env, database } = setup();
+    await adminSession(app, env, database);
+    seedSubscription(database);
+    database.prepare(
+      `UPDATE subscription_term_versions
+       SET effective_start = '2000-01-01', billing_anchor_date = '2000-01-01', effective_end = '2098-12-31'
+       WHERE id = 'term-1'`,
+    ).run();
+    database.prepare(
+      `INSERT INTO subscription_term_versions
+         (id, subscription_id, effective_start, effective_end, billing_cycle, settlement_mode, billing_anchor_date, original_currency, amount_minor)
+       VALUES ('term-future', 'sub-1', '2099-01-01', NULL, 'yearly', 'actual_bill', '2099-01-01', 'CNY', 99900)`,
+    ).run();
+
+    const list = await request(app, env, '/api/subscriptions');
+    const body = await list.json() as { data: Array<Record<string, unknown>> };
+    expect(body.data[0]).toMatchObject({
+      amount_minor: 20000,
+      original_currency: 'USD',
+      active_term_version_id: 'term-1',
+    });
+  });
+
   it('closes the active term and opens a new version when price or cycle changes with a later start', async () => {
     const { app, env, database } = setup();
     await adminSession(app, env, database);
