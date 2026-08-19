@@ -17,10 +17,16 @@ import { accessEntryForRequest, isAllowedEntryOrigin, normalizeVerifiedEmail, ty
 import { IdentityProblem, IdentityStore } from './lib/identity-store';
 import { fetchCnyRate, rateToMinorUnitRational } from './lib/fx';
 import {
-  buildAccrualCandidates,
+  BILLING_CYCLES,
   buildActualBillCandidates,
   deriveContiguousPaidThrough,
 } from './lib/reimbursement-engine';
+import {
+  displayUntil,
+  generationEndCap,
+  shouldMarkEnded,
+  sunsetReason,
+} from './lib/subscription-sunset';
 import {
   buildSubmissionPlan,
   fingerprintBatchRequest,
@@ -494,7 +500,8 @@ async function createImportedUser(env: Env, displayName: string): Promise<string
 type CandidateGenerationSource = {
   term_version_id: string;
   subscription_id: string;
-  billing_cycle: 'monthly' | 'quarterly' | 'yearly' | 'one_time';
+  auto_renew: number;
+  billing_cycle: typeof BILLING_CYCLES[number];
   settlement_mode: 'actual_bill' | 'accrual';
   term_effective_start: string;
   term_effective_end: string | null;
@@ -613,6 +620,78 @@ async function paidWatermarkForAssignment(
 }
 
 /**
+ * 一次性从开始日展示一个月；不自动续费或已到期则展示到当前账期的下一周期开始日。
+ */
+async function lapseTerminalSubscriptions(env: Env, today: string): Promise<number> {
+  const rows = await env.DB.prepare(
+    `SELECT
+       subscription.id AS id,
+       subscription.auto_renew AS auto_renew,
+       term.billing_cycle AS billing_cycle,
+       term.effective_start AS term_start,
+       term.effective_end AS term_end,
+       term.billing_anchor_date AS billing_anchor_date
+     FROM subscriptions AS subscription
+     LEFT JOIN subscription_term_versions AS term
+       ON term.id = (
+         SELECT candidate.id
+         FROM subscription_term_versions AS candidate
+         WHERE candidate.subscription_id = subscription.id
+         ORDER BY
+           CASE
+             WHEN candidate.effective_start <= ?
+               AND (candidate.effective_end IS NULL OR candidate.effective_end >= ?)
+             THEN 0
+             ELSE 1
+           END,
+           candidate.effective_start DESC
+         LIMIT 1
+       )
+     WHERE subscription.status = 'active'`,
+  ).bind(today, today).all<{
+    id: string;
+    auto_renew: number;
+    billing_cycle: typeof BILLING_CYCLES[number] | null;
+    term_start: string | null;
+    term_end: string | null;
+    billing_anchor_date: string | null;
+  }>();
+
+  const ended: Array<{ id: string; reason: string; displayUntil: string }> = [];
+  for (const row of rows.results) {
+    const reason = sunsetReason({
+      billingCycle: row.billing_cycle,
+      autoRenew: Boolean(row.auto_renew),
+      termEnd: row.term_end,
+    });
+    if (!reason) continue;
+    const until = displayUntil({
+      billingCycle: row.billing_cycle,
+      autoRenew: Boolean(row.auto_renew),
+      termStart: row.term_start,
+      termEnd: row.term_end,
+      billingAnchorDate: row.billing_anchor_date,
+    });
+    if (!until || !shouldMarkEnded(today, until)) continue;
+    ended.push({ id: row.id, reason, displayUntil: until });
+  }
+  if (ended.length === 0) return 0;
+  await env.DB.batch(ended.flatMap((item) => [
+    env.DB.prepare(
+      `UPDATE subscriptions SET status = 'ended', updated_at = datetime('now') WHERE id = ? AND status = 'active'`,
+    ).bind(item.id),
+    env.DB.prepare(
+      `INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, detail_json)
+       VALUES (?, NULL, 'lapse_subscription', 'subscription', ?, ?)`,
+    ).bind(crypto.randomUUID(), item.id, JSON.stringify({
+      reason: item.reason,
+      display_until: item.displayUntil,
+    })),
+  ]));
+  return ended.length;
+}
+
+/**
  * 根据版本化条款、付款者有效期和连续已付款水位生成候选。它只创建未存在的
  * 费用快照；实际报销选择仍由单独的 batch API 管理。
  */
@@ -634,10 +713,26 @@ async function generateReimbursementCandidates(
   const { cutoffDate, fetcher } = options;
   const subscriptionId = options.subscriptionId ?? null;
   const payerOwnerUserId = options.payerOwnerUserId ?? null;
+  const sourceVisibility = `
+       WHERE (
+         subscription.status = 'active'
+         OR (? IS NOT NULL AND subscription.id = ?)
+         OR (
+           subscription.status = 'ended'
+           AND NOT EXISTS (
+             SELECT 1 FROM reimbursement_candidates AS existing
+             JOIN subscription_term_versions AS existing_term ON existing_term.id = existing.subscription_term_version_id
+             WHERE existing_term.subscription_id = subscription.id AND existing.status != 'void'
+           )
+         )
+       )
+         AND term.effective_start <= ?
+         AND assignment.effective_start <= ?
+         AND (assignment.effective_end IS NULL OR assignment.effective_end >= ?)`;
   const sources = payerOwnerUserId
     ? await env.DB.prepare(
       `SELECT
-         term.id AS term_version_id, subscription.id AS subscription_id,
+         term.id AS term_version_id, subscription.id AS subscription_id, subscription.auto_renew,
          term.billing_cycle, term.settlement_mode,
          term.effective_start AS term_effective_start, term.effective_end AS term_effective_end,
          term.billing_anchor_date, term.original_currency, term.amount_minor,
@@ -647,18 +742,14 @@ async function generateReimbursementCandidates(
        JOIN subscriptions AS subscription ON subscription.id = term.subscription_id
        JOIN payer_assignments AS assignment ON assignment.subscription_id = subscription.id
        JOIN payers AS payer ON payer.id = assignment.payer_id
-       WHERE subscription.status = 'active'
-         AND term.effective_start <= ?
-         AND (term.effective_end IS NULL OR term.effective_end >= ?)
-         AND assignment.effective_start <= ?
-         AND (assignment.effective_end IS NULL OR assignment.effective_end >= ?)
+       ${sourceVisibility}
          AND payer.owner_user_id = ?
          AND (? IS NULL OR subscription.id = ?)
        ORDER BY subscription.id, term.effective_start, assignment.effective_start`,
-    ).bind(cutoffDate, cutoffDate, cutoffDate, cutoffDate, payerOwnerUserId, subscriptionId, subscriptionId).all<CandidateGenerationSource>()
+    ).bind(subscriptionId, subscriptionId, cutoffDate, cutoffDate, cutoffDate, payerOwnerUserId, subscriptionId, subscriptionId).all<CandidateGenerationSource>()
     : await env.DB.prepare(
       `SELECT
-         term.id AS term_version_id, subscription.id AS subscription_id,
+         term.id AS term_version_id, subscription.id AS subscription_id, subscription.auto_renew,
          term.billing_cycle, term.settlement_mode,
          term.effective_start AS term_effective_start, term.effective_end AS term_effective_end,
          term.billing_anchor_date, term.original_currency, term.amount_minor,
@@ -667,14 +758,10 @@ async function generateReimbursementCandidates(
        FROM subscription_term_versions AS term
        JOIN subscriptions AS subscription ON subscription.id = term.subscription_id
        JOIN payer_assignments AS assignment ON assignment.subscription_id = subscription.id
-       WHERE subscription.status = 'active'
-         AND term.effective_start <= ?
-         AND (term.effective_end IS NULL OR term.effective_end >= ?)
-         AND assignment.effective_start <= ?
-         AND (assignment.effective_end IS NULL OR assignment.effective_end >= ?)
+       ${sourceVisibility}
          AND (? IS NULL OR subscription.id = ?)
        ORDER BY subscription.id, term.effective_start, assignment.effective_start`,
-    ).bind(cutoffDate, cutoffDate, cutoffDate, cutoffDate, subscriptionId, subscriptionId).all<CandidateGenerationSource>();
+    ).bind(subscriptionId, subscriptionId, cutoffDate, cutoffDate, cutoffDate, subscriptionId, subscriptionId).all<CandidateGenerationSource>();
 
   const drafts: Array<{
     termVersionId: string;
@@ -691,24 +778,28 @@ async function generateReimbursementCandidates(
   for (const source of sources.results) {
     const fx = await fxRateForSubscriptionStart(env, source.original_currency, source.term_effective_start, cutoffDate, fetcher);
     const lastReimbursedThrough = await paidWatermarkForAssignment(env, source);
+    const subscriptionEndDate = generationEndCap({
+      billingCycle: source.billing_cycle,
+      autoRenew: Boolean(source.auto_renew),
+      termStart: source.term_effective_start,
+      termEnd: source.term_effective_end,
+    });
     const request = {
       subscriptionId: source.subscription_id,
       payerId: source.payer_id,
       currency: source.original_currency,
       amountMinor: source.amount_minor,
       billingCycle: source.billing_cycle,
-      billingAnchorDate: source.billing_anchor_date,
+      billingAnchorDate: source.term_effective_start,
       subscriptionStartDate: source.term_effective_start,
-      ...(source.term_effective_end ? { subscriptionEndDate: source.term_effective_end } : {}),
+      ...(subscriptionEndDate ? { subscriptionEndDate } : {}),
       payerActiveFrom: source.payer_effective_start,
       ...(source.payer_effective_end ? { payerActiveUntil: source.payer_effective_end } : {}),
       ...(lastReimbursedThrough ? { lastReimbursedThrough } : {}),
       cutoffDate,
       rate: { numerator: fx.rateNumerator, denominator: fx.rateDenominator },
     };
-    const generated = source.settlement_mode === 'actual_bill'
-      ? buildActualBillCandidates(request)
-      : buildAccrualCandidates(request);
+    const generated = buildActualBillCandidates(request);
     for (const candidate of generated) {
       drafts.push({
         termVersionId: source.term_version_id,
@@ -725,6 +816,7 @@ async function generateReimbursementCandidates(
     }
   }
   if (drafts.length === 0) {
+    await lapseTerminalSubscriptions(env, cutoffDate);
     return { generated: 0, skipped_existing: 0, source_count: sources.results.length, drafted_count: 0, cutoff_date: cutoffDate };
   }
   const statements: D1PreparedStatement[] = drafts.map((candidate) => env.DB.prepare(
@@ -749,6 +841,7 @@ async function generateReimbursementCandidates(
   ));
   const results = await env.DB.batch(statements);
   const inserted = results.filter((result) => result.meta.changes === 1).length;
+  await lapseTerminalSubscriptions(env, cutoffDate);
   return {
     generated: inserted,
     skipped_existing: drafts.length - inserted,
@@ -1220,6 +1313,7 @@ app.get('/api/subscriptions', async (c) => {
   // 清单优先展示「今天仍覆盖」的条款；若条款已截止但仍有历史版本，回退到最近一条，
   // 避免资产仍有效、价格已录入却因 effective_end 过期显示为空。业务日用上海时区，不用 UTC date('now')。
   const today = shanghaiBusinessDate();
+  await lapseTerminalSubscriptions(c.env, today);
   let sql = `SELECT DISTINCT
       subscription.id, subscription.name, subscription.status, subscription.owner_user_id,
       subscription.auto_renew, subscription.payment_method_masked, subscription.notes,
@@ -1263,7 +1357,7 @@ app.get('/api/subscriptions', async (c) => {
 type SubscriptionTermInput = {
   effectiveStart: string;
   effectiveEnd: string | null;
-  billingCycle: 'monthly' | 'quarterly' | 'yearly' | 'one_time';
+  billingCycle: typeof BILLING_CYCLES[number];
   originalCurrency: string;
   amountMinor: number;
 };
@@ -1294,7 +1388,7 @@ function parseTermInput(body: Record<string, unknown>): SubscriptionTermInput | 
   if (body.term === undefined || body.term === null) return null;
   if (!isRecord(body.term)) throw new ApiProblem(400, 'invalid_field', 'term 必须是对象。');
   const effectiveStart = isoDate(requiredString(body.term, 'effective_start', 10), 'term.effective_start');
-  const billingCycle = enumValue(body.term, 'billing_cycle', ['monthly', 'quarterly', 'yearly', 'one_time'] as const);
+  const billingCycle = enumValue(body.term, 'billing_cycle', BILLING_CYCLES);
   const originalCurrency = requiredString(body.term, 'original_currency', 12).toUpperCase();
   if (!/^[A-Z]{3}$/.test(originalCurrency)) throw new ApiProblem(400, 'invalid_currency', 'term.original_currency 必须是三位 ISO 币种代码。');
   const amountMinor = integer(body.term, 'amount_minor', 0);
@@ -1471,7 +1565,7 @@ app.put('/api/subscriptions/:subscriptionId/operational', async (c) => {
     const endSame = !termEndProvided || (activeTerm && (activeTerm.effective_end ?? null) === (termEnd ?? null));
     if (!fieldsSame || !endSame) {
       termChanged = true;
-      const settlementMode = activeTerm?.settlement_mode ?? 'actual_bill';
+      const settlementMode = 'actual_bill';
       if (!activeTerm) {
         termStatements.push(c.env.DB.prepare(
           `INSERT INTO subscription_term_versions
@@ -1515,18 +1609,20 @@ app.put('/api/subscriptions/:subscriptionId/operational', async (c) => {
     await c.env.DB.batch([
       c.env.DB.prepare(
         `UPDATE subscriptions
-         SET auto_renew = ?, payment_method_masked = ?, notes = ?, owner_user_id = ?, updated_at = datetime('now')
+         SET auto_renew = ?, payment_method_masked = ?, notes = ?, owner_user_id = ?,
+             status = CASE WHEN ? THEN 'active' ELSE status END, updated_at = datetime('now')
          WHERE id = ?`,
-      ).bind(autoRenew, paymentMethodMasked, notes, ownerUserId, subscriptionId),
+      ).bind(autoRenew, paymentMethodMasked, notes, ownerUserId, termChanged ? 1 : 0, subscriptionId),
       ...termStatements,
     ]);
   } else {
     await c.env.DB.batch([
       c.env.DB.prepare(
         `UPDATE subscriptions
-         SET auto_renew = ?, payment_method_masked = ?, notes = ?, updated_at = datetime('now')
+         SET auto_renew = ?, payment_method_masked = ?, notes = ?,
+             status = CASE WHEN ? THEN 'active' ELSE status END, updated_at = datetime('now')
          WHERE id = ?`,
-      ).bind(autoRenew, paymentMethodMasked, notes, subscriptionId),
+      ).bind(autoRenew, paymentMethodMasked, notes, termChanged ? 1 : 0, subscriptionId),
       ...termStatements,
     ]);
   }
@@ -1554,8 +1650,7 @@ app.post('/api/subscriptions/:subscriptionId/term-versions', async (c) => {
   const effectiveStart = isoDate(requiredString(body, 'effective_start', 10), 'effective_start');
   const effectiveEnd = optionalIsoDate(optionalString(body, 'effective_end', 10), 'effective_end');
   if (effectiveEnd && effectiveEnd < effectiveStart) throw new ApiProblem(400, 'invalid_date_range', 'effective_end 不能早于 effective_start。');
-  const billingCycle = enumValue(body, 'billing_cycle', ['monthly', 'quarterly', 'yearly', 'one_time'] as const);
-  const settlementMode = enumValue(body, 'settlement_mode', ['actual_bill', 'accrual'] as const);
+  const billingCycle = enumValue(body, 'billing_cycle', BILLING_CYCLES);
   const billingAnchorDate = isoDate(requiredString(body, 'billing_anchor_date', 10), 'billing_anchor_date');
   const originalCurrency = requiredString(body, 'original_currency', 12).toUpperCase();
   const amountMinor = integer(body, 'amount_minor', 0);
@@ -1563,14 +1658,13 @@ app.post('/api/subscriptions/:subscriptionId/term-versions', async (c) => {
     `INSERT INTO subscription_term_versions (
        id, subscription_id, effective_start, effective_end, billing_cycle,
        settlement_mode, billing_anchor_date, original_currency, amount_minor
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, 'actual_bill', ?, ?, ?)`,
   ).bind(
     id,
     c.req.param('subscriptionId'),
     effectiveStart,
     effectiveEnd,
     billingCycle,
-    settlementMode,
     billingAnchorDate,
     originalCurrency,
     amountMinor,

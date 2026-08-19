@@ -205,6 +205,8 @@ describe('identity settings and external binding UI', () => {
     expect(html).toContain('form.elements.owner_user_id.value');
     expect(html).toContain('id="subscriptions-filter"');
     expect(html).toContain('data-subscriptions-filter="status"');
+    expect(html).toContain('value="active" selected');
+    expect(html).toContain("status: 'active'");
     expect(html).toContain('data-subscriptions-filter="owner"');
     expect(html).toContain('data-subscriptions-filter="payer"');
     expect(html).toContain('data-subscriptions-filter="q"');

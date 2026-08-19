@@ -174,6 +174,7 @@ describe('subscription operational editing', () => {
       original_currency: 'USD',
       term_effective_start: '2000-01-01',
       term_effective_end: '2000-12-31',
+      status: 'ended',
     });
   });
 
@@ -349,6 +350,78 @@ describe('subscription creation with term and payer', () => {
     });
     expect(badRange.status).toBe(400);
     expect(database.prepare(`SELECT COUNT(*) AS count FROM subscriptions WHERE name = '坏订阅'`).get() as { count: number }).toMatchObject({ count: 0 });
+  });
+});
+
+describe('subscription sunset after last cycle', () => {
+  it('marks one-time, expired, and non-renewing subscriptions ended after the one-month display window', async () => {
+    const { app, env, database } = setup();
+    await adminSession(app, env, database);
+    database.prepare(`INSERT INTO users (id, display_name) VALUES ('user-lisi', '李四')`).run();
+    database.prepare(
+      `INSERT INTO subscriptions (id, name, auto_renew, status) VALUES
+         ('sub-one-time', '一次性工具', 0, 'active'),
+         ('sub-expired', '已到期年付', 1, 'active'),
+         ('sub-no-renew', '不续费月付', 0, 'active'),
+         ('sub-renewing', '持续月付', 1, 'active')`,
+    ).run();
+    database.prepare(
+      `INSERT INTO subscription_term_versions
+         (id, subscription_id, effective_start, effective_end, billing_cycle, settlement_mode, billing_anchor_date, original_currency, amount_minor)
+       VALUES
+         ('term-one-time', 'sub-one-time', '2020-03-01', NULL, 'one_time', 'actual_bill', '2020-03-01', 'CNY', 10000),
+         ('term-expired', 'sub-expired', '2020-01-01', '2020-12-31', 'yearly', 'actual_bill', '2020-01-01', 'CNY', 10000),
+         ('term-no-renew', 'sub-no-renew', '2020-01-01', NULL, 'monthly', 'actual_bill', '2020-01-01', 'CNY', 10000),
+         ('term-renewing', 'sub-renewing', '2020-01-01', NULL, 'monthly', 'actual_bill', '2020-01-01', 'CNY', 10000)`,
+    ).run();
+    database.prepare(`INSERT INTO payers (id, display_name, active_from) VALUES ('payer-1', '王五', '2020-01-01')`).run();
+    database.prepare(
+      `INSERT INTO payer_assignments (id, subscription_id, payer_id, effective_start)
+       VALUES ('assign-no-renew', 'sub-no-renew', 'payer-1', '2020-01-01')`,
+    ).run();
+    database.prepare(
+      `INSERT INTO reimbursement_candidates (
+         id, subscription_term_version_id, payer_assignment_id, coverage_start, coverage_end,
+         original_currency, original_amount_minor, rate_numerator, rate_denominator, cny_amount_fen, status
+       ) VALUES
+         ('cand-no-renew', 'term-no-renew', 'assign-no-renew', '2020-06-01', '2020-06-30', 'CNY', 10000, 1, 1, 10000, 'pending')`,
+    ).run();
+
+    const list = await request(app, env, '/api/subscriptions');
+    const body = await list.json() as { data: Array<{ id: string; status: string }> };
+    const byId = Object.fromEntries(body.data.map((row) => [row.id, row.status]));
+    expect(byId['sub-one-time']).toBe('ended');
+    expect(byId['sub-expired']).toBe('ended');
+    expect(byId['sub-no-renew']).toBe('ended');
+    expect(byId['sub-renewing']).toBe('active');
+    expect(database.prepare(`SELECT COUNT(*) AS count FROM audit_events WHERE action = 'lapse_subscription'`).get() as { count: number }).toMatchObject({ count: 3 });
+  });
+
+  it('does not generate the next cycle after a non-renewing subscription is settled', async () => {
+    const { app, env, database } = setup();
+    await adminSession(app, env, database);
+    database.prepare(`INSERT INTO payers (id, display_name, active_from) VALUES ('payer-1', '王五', '2025-01-01')`).run();
+    database.prepare(`INSERT INTO subscriptions (id, name, auto_renew) VALUES ('sub-1', '不续费', 0)`).run();
+    database.prepare(
+      `INSERT INTO subscription_term_versions
+         (id, subscription_id, effective_start, billing_cycle, settlement_mode, billing_anchor_date, original_currency, amount_minor)
+       VALUES ('term-1', 'sub-1', '2025-01-01', 'monthly', 'actual_bill', '2025-01-01', 'CNY', 10000)`,
+    ).run();
+    database.prepare(`INSERT INTO payer_assignments (id, subscription_id, payer_id, effective_start) VALUES ('assign-1', 'sub-1', 'payer-1', '2025-01-01')`).run();
+    database.prepare(
+      `INSERT INTO reimbursement_candidates (
+         id, subscription_term_version_id, payer_assignment_id, coverage_start, coverage_end,
+         original_currency, original_amount_minor, rate_numerator, rate_denominator, cny_amount_fen, status
+       ) VALUES ('cand-1', 'term-1', 'assign-1', '2025-06-01', '2025-06-30', 'CNY', 10000, 1, 1, 10000, 'pending')`,
+    ).run();
+
+    const generate = await mutate(app, env, 'POST', '/api/reimbursements/generate-candidates', { cutoff_date: '2025-08-15' });
+    expect(generate.status).toBe(201);
+    const starts = database.prepare(
+      `SELECT coverage_start FROM reimbursement_candidates WHERE subscription_term_version_id = 'term-1' ORDER BY coverage_start`,
+    ).all() as Array<{ coverage_start: string }>;
+    expect(starts.map((row) => row.coverage_start)).toEqual(['2025-01-01', '2025-06-01']);
+    expect(database.prepare(`SELECT status FROM subscriptions WHERE id = 'sub-1'`).get() as { status: string }).toMatchObject({ status: 'ended' });
   });
 });
 

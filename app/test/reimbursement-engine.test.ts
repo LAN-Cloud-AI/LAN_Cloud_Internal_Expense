@@ -98,8 +98,9 @@ describe('buildActualBillCandidates', () => {
   it.each([
     { cycle: 'monthly', expected: [['2026-05-20', '2026-06-19'], ['2026-06-20', '2026-07-19'], ['2026-07-20', '2026-08-19']] },
     { cycle: 'quarterly', expected: [['2026-05-20', '2026-08-19']] },
+    { cycle: 'semi_annual', expected: [['2026-05-20', '2026-11-19']] },
     { cycle: 'yearly', expected: [['2026-05-20', '2027-05-19']] },
-  ] as const)('订阅开始日即锚点的 %s 订阅：账期开始即全额入账，周期整期连续覆盖', ({ cycle, expected }) => {
+  ] as const)('订阅开始日即锚点的 %s 订阅：账期开始即整期一次性入账，周期整期连续覆盖', ({ cycle, expected }) => {
     const candidates = buildActualBillCandidates({
       subscriptionId: 'sub-cycles',
       payerId: 'payer-a',
@@ -131,6 +132,29 @@ describe('buildActualBillCandidates', () => {
     });
 
     expect(candidates).toEqual([]);
+  });
+
+  it('月付从生效日整期一次性入账：2026-08-21 至 2026-09-20', () => {
+    const candidates = buildActualBillCandidates({
+      subscriptionId: 'sub-month',
+      payerId: 'payer-a',
+      currency: 'CNY',
+      amountMinor: 19_900,
+      billingCycle: 'monthly',
+      billingAnchorDate: '2026-08-21',
+      subscriptionStartDate: '2026-08-21',
+      cutoffDate: '2026-08-21',
+      rate: { numerator: 1, denominator: 1 },
+    });
+
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        coverageStart: '2026-08-21',
+        coverageEnd: '2026-09-20',
+        originalAmountMinor: 19_900,
+        cnyAmountFen: 19_900,
+      }),
+    ]);
   });
 
   it('一次性订阅只在开始日产生一条全额候选', () => {

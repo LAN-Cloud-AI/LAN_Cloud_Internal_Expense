@@ -5,7 +5,8 @@
  * `CNY 分 / 原币最小单位` 的有理数，避免浮点数进入财务计算。
  */
 
-export type BillingCycle = 'monthly' | 'quarterly' | 'yearly' | 'one_time';
+export const BILLING_CYCLES = ['monthly', 'quarterly', 'semi_annual', 'yearly', 'one_time'] as const;
+export type BillingCycle = (typeof BILLING_CYCLES)[number];
 
 export interface RationalRate {
   numerator: number;
@@ -111,7 +112,7 @@ function daysInclusive(start: string, end: string): number {
 }
 
 /** Adds calendar months while pinning 29/30/31 to the target month's last day. */
-function addMonthsClamped(value: string, months: number): string {
+export function addMonthsClamped(value: string, months: number): string {
   const original = parseDate(value);
   const desiredDay = original.getUTCDate();
   const year = original.getUTCFullYear();
@@ -124,21 +125,47 @@ function addMonthsClamped(value: string, months: number): string {
   return formatDate(firstOfTarget);
 }
 
-function monthsPerCycle(cycle: Exclude<BillingCycle, 'one_time'>): number {
+export function monthsPerCycle(cycle: Exclude<BillingCycle, 'one_time'>): number {
   switch (cycle) {
     case 'monthly':
       return 1;
     case 'quarterly':
       return 3;
+    case 'semi_annual':
+      return 6;
     case 'yearly':
       return 12;
   }
+}
+
+export function nextCycleStart(cycleStart: string, cycle: Exclude<BillingCycle, 'one_time'>): string {
+  return addMonthsClamped(cycleStart, monthsPerCycle(cycle));
 }
 
 function cycleBounds(anchor: string, cycle: Exclude<BillingCycle, 'one_time'>, index: number) {
   const cycleStart = addMonthsClamped(anchor, index * monthsPerCycle(cycle));
   const nextCycleStart = addMonthsClamped(anchor, (index + 1) * monthsPerCycle(cycle));
   return { cycleStart, cycleEnd: addDays(nextCycleStart, -1) };
+}
+
+/** 不晚于 horizon 的最后一个账期开始日；若首期尚未开始则返回首期开始日。 */
+export function lastCycleStartOnOrBefore(
+  anchor: string,
+  cycle: Exclude<BillingCycle, 'one_time'>,
+  horizon: string,
+): string {
+  parseDate(anchor);
+  parseDate(horizon);
+  let index = 0;
+  let bounds = cycleBounds(anchor, cycle, index);
+  if (compareDate(bounds.cycleStart, horizon) > 0) return bounds.cycleStart;
+  while (true) {
+    const next = cycleBounds(anchor, cycle, index + 1);
+    if (compareDate(next.cycleStart, horizon) > 0) return bounds.cycleStart;
+    index += 1;
+    if (index > 2_400) throw new Error('billing anchor is unreasonably old');
+    bounds = next;
+  }
 }
 
 function calculateCnyFen(originalAmountMinor: number, rate: RationalRate): number {
