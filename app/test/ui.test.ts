@@ -192,6 +192,7 @@ describe('identity settings and external binding UI', () => {
     expect(html).toContain('data-action="cancel-edit-subscription"');
     expect(html).toContain('name="amount"');
     expect(html).toContain('name="billing_cycle"');
+    expect(html).toContain('value="semi_annual">半年付');
     expect(html).toContain('name="effective_start"');
     expect(html).toContain('name="term_effective_end"');
     expect(html).toContain('name="payer_user_id"');

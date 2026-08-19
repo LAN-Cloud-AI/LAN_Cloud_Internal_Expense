@@ -5,7 +5,7 @@
  * `CNY 分 / 原币最小单位` 的有理数，避免浮点数进入财务计算。
  */
 
-export const BILLING_CYCLES = ['monthly', 'quarterly', 'yearly', 'one_time'] as const;
+export const BILLING_CYCLES = ['monthly', 'quarterly', 'semi_annual', 'yearly', 'one_time'] as const;
 export type BillingCycle = (typeof BILLING_CYCLES)[number];
 
 export interface RationalRate {
@@ -131,6 +131,8 @@ export function monthsPerCycle(cycle: Exclude<BillingCycle, 'one_time'>): number
       return 1;
     case 'quarterly':
       return 3;
+    case 'semi_annual':
+      return 6;
     case 'yearly':
       return 12;
   }

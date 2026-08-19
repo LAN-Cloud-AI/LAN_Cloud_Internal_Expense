@@ -98,6 +98,7 @@ describe('buildActualBillCandidates', () => {
   it.each([
     { cycle: 'monthly', expected: [['2026-05-20', '2026-06-19'], ['2026-06-20', '2026-07-19'], ['2026-07-20', '2026-08-19']] },
     { cycle: 'quarterly', expected: [['2026-05-20', '2026-08-19']] },
+    { cycle: 'semi_annual', expected: [['2026-05-20', '2026-11-19']] },
     { cycle: 'yearly', expected: [['2026-05-20', '2027-05-19']] },
   ] as const)('订阅开始日即锚点的 %s 订阅：账期开始即整期一次性入账，周期整期连续覆盖', ({ cycle, expected }) => {
     const candidates = buildActualBillCandidates({

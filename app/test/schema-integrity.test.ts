@@ -30,6 +30,23 @@ function createDatabase(): Database.Database {
   return database;
 }
 
+function createDatabaseBeforeSemiAnnualMigration(): Database.Database {
+  const database = new Database(':memory:');
+  database.pragma('foreign_keys = ON');
+
+  for (const migrationName of readdirSync(migrationsDir)
+    .filter((name) => name.endsWith('.sql') && name < '0017_billing_cycle_semi_annual.sql')
+    .sort()) {
+    if (migrationName === '0006_access_identities.sql') {
+      seedLedger(database);
+    }
+    database.exec(readFileSync(join(migrationsDir, migrationName), 'utf8'));
+  }
+
+  databases.push(database);
+  return database;
+}
+
 function createDatabaseBeforeAccountIdentifierMigration(): Database.Database {
   const database = new Database(':memory:');
   database.pragma('foreign_keys = ON');
@@ -111,6 +128,63 @@ function insertItem(
 }
 
 describe('报销账本完整性约束', () => {
+  it('重建条款表后保留已有账本，并允许半年付周期', () => {
+    const database = createDatabaseBeforeSemiAnnualMigration();
+    insertItem(database, {
+      id: 'item-paid',
+      batchId: 'batch-a',
+      candidateId: 'candidate-a',
+      payerId: 'payer-a',
+    });
+    database.prepare("UPDATE reimbursement_items SET status = 'paid' WHERE id = 'item-paid'").run();
+
+    database.exec(readFileSync(join(migrationsDir, '0017_billing_cycle_semi_annual.sql'), 'utf8'));
+
+    expect(
+      database.prepare(
+        `SELECT billing_cycle FROM subscription_term_versions WHERE id = 'term-1'`,
+      ).get(),
+    ).toEqual({ billing_cycle: 'monthly' });
+    expect(
+      database.prepare(`SELECT id, status FROM reimbursement_candidates WHERE id = 'candidate-a'`).get(),
+    ).toEqual({ id: 'candidate-a', status: 'pending' });
+    expect(
+      database.prepare(`SELECT id, status, cny_amount_fen FROM reimbursement_items WHERE id = 'item-paid'`).get(),
+    ).toEqual({ id: 'item-paid', status: 'paid', cny_amount_fen: 1000 });
+    expect(() =>
+      database.prepare("UPDATE reimbursement_items SET cny_amount_fen = 1 WHERE id = 'item-paid'").run(),
+    ).toThrow(/paid reimbursement item is immutable/);
+    expect(() =>
+      database.prepare("UPDATE reimbursement_batches SET payer_id = 'payer-b' WHERE id = 'batch-a'").run(),
+    ).toThrow(/batch payer does not match existing item payer/);
+
+    database.prepare(
+      "UPDATE subscription_term_versions SET effective_end = '2026-12-31' WHERE id = 'term-1'",
+    ).run();
+    expect(() =>
+      database.prepare(
+        `INSERT INTO subscription_term_versions (
+          id, subscription_id, effective_start, billing_cycle, settlement_mode,
+          billing_anchor_date, original_currency, amount_minor
+        ) VALUES (
+          'term-semi', 'subscription-1', '2027-01-01', 'semi_annual', 'actual_bill',
+          '2027-01-01', 'CNY', 6000
+        )`,
+      ).run(),
+    ).not.toThrow();
+    expect(() =>
+      database.prepare(
+        `INSERT INTO subscription_term_versions (
+          id, subscription_id, effective_start, billing_cycle, settlement_mode,
+          billing_anchor_date, original_currency, amount_minor
+        ) VALUES (
+          'term-bad', 'subscription-1', '2028-01-01', 'biweekly', 'actual_bill',
+          '2028-01-01', 'CNY', 1
+        )`,
+      ).run(),
+    ).toThrow();
+  });
+
   it('订阅的自动续费标记只能是布尔值，付款方式与备注属于可变主数据', () => {
     const database = createDatabase();
     database.prepare(
