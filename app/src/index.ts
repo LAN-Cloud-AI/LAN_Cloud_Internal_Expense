@@ -33,7 +33,7 @@ import {
   type PersistedCandidateForSubmission,
 } from './lib/reimbursement-submission';
 import type { Env } from './lib/types';
-import { handleOnePass, onePassEnabled, onePassIdentity } from './lib/onepass';
+import { handleOnePass, onePassEnabled, onePassIdentity, onePassMembersUrl, onePassOwnsMemberManagement } from './lib/onepass';
 import { expensePrincipalFromOnePass } from './lib/onepass-principal';
 import {
   renderAdminUi,
@@ -46,6 +46,7 @@ type AppVariables = {
   entry: AccessEntry | null;
   principal: Principal | null;
   onePassLogin: boolean;
+  canManageOnePassMembers: boolean;
 };
 
 export type AppBindings = {
@@ -924,6 +925,9 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
     }
 
     if (c.req.path === '/api/health') return next();
+    if (onePassOwnsMemberManagement(c.env) && /^\/api\/(?:users|roles|login-whitelist)(?:\/|$)/.test(c.req.path)) {
+      return problem(c, 410, 'member_management_moved', '成员和角色由 OnePass 管理。');
+    }
 
     const onePassLogin = !legacyFixture;
     if (onePassEnabled(c.env) && (onePassLogin || c.req.path === '/api/internal/onepass/events')) {
@@ -939,6 +943,8 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
           return c.html(renderCorporateAccessRequiredUi(true, true), 403);
         }
         c.set('principal', principal);
+        const orgRole = identity.membership.org_role;
+        c.set('canManageOnePassMembers', orgRole === 'org_super_admin' || orgRole === 'org_admin');
       }
       return next();
     }
@@ -1127,9 +1133,11 @@ app.get('/api/roles', async (c) => {
 app.get('/api/account-owners', async (c) => {
   const auth = requireRoles(c, DATA_ADMIN_ROLES);
   if (isResponse(auth)) return auth;
+  const activeOnly = c.req.query('active') === '1';
   const owners = await c.env.DB.prepare(
     `SELECT user.id, user.display_name
      FROM users AS user
+     ${activeOnly ? "WHERE user.employment_status = 'active'" : ''}
      ORDER BY user.display_name, user.id`,
   ).all<{ id: string; display_name: string }>();
   return c.json({ data: owners.results });
@@ -1922,17 +1930,31 @@ app.post('/api/reimbursements/preview', async (c) => {
   });
 });
 
+function reimbursementReviewers(env: Env, reviewerUserId?: string): D1PreparedStatement {
+  return env.DB.prepare(
+    `SELECT user.id, user.display_name
+     FROM users AS user
+     LEFT JOIN onepass_local_accounts AS account ON account.user_id = user.id AND account.org_id = ?
+     LEFT JOIN onepass_grants AS grant ON grant.membership_id = account.membership_id AND grant.org_id = account.org_id
+     WHERE user.employment_status = 'active'
+       AND (
+         (account.enabled = 1 AND grant.enabled = 1 AND EXISTS (
+           SELECT 1 FROM json_each(grant.application_roles_json) WHERE value IN ('system_admin', 'finance_reviewer')
+         ))
+         OR (? = 0 AND grant.application_roles_json IS NULL AND EXISTS (
+           SELECT 1 FROM user_roles AS assignment JOIN roles AS role ON role.id = assignment.role_id
+           WHERE assignment.user_id = user.id AND role.code IN ('system_admin', 'finance_reviewer')
+         ))
+       )
+       ${reviewerUserId ? 'AND user.id = ?' : ''}
+     ORDER BY user.display_name, user.id`,
+  ).bind(env.ONEPASS_ORG_ID ?? null, env.ONEPASS_MANAGED_MEMBER_ROLES === '1' ? 1 : 0, ...(reviewerUserId ? [reviewerUserId] : []));
+}
+
 app.get('/api/reimbursements/reviewers', async (c) => {
   const auth = requireRoles(c, ['system_admin', 'asset_admin', 'finance_reviewer', 'auditor', 'payer', 'employee']);
   if (isResponse(auth)) return auth;
-  const rows = await c.env.DB.prepare(
-    `SELECT DISTINCT user.id, user.display_name
-     FROM users AS user
-     JOIN user_roles AS assignment ON assignment.user_id = user.id
-     JOIN roles AS role ON role.id = assignment.role_id
-     WHERE user.employment_status = 'active' AND role.code IN ('system_admin', 'finance_reviewer')
-     ORDER BY user.display_name`,
-  ).all();
+  const rows = await reimbursementReviewers(c.env).all();
   return c.json({ data: rows.results });
 });
 
@@ -1949,15 +1971,7 @@ app.post('/api/reimbursements/create-batches', async (c) => {
   const canonicalRequest = fingerprintBatchRequest({ cutoffDate, candidateIds });
   // 提交报销必须指定审批人：具备财务审核权限的在职账号，后续审批/付款由其完成。
   const reviewerUserId = requiredString(body, 'reviewer_user_id', 80);
-  const reviewer = await c.env.DB.prepare(
-    `SELECT user.id, user.display_name
-     FROM users AS user
-     JOIN user_roles AS assignment ON assignment.user_id = user.id
-     JOIN roles AS role ON role.id = assignment.role_id
-     WHERE user.id = ? AND user.employment_status = 'active'
-       AND role.code IN ('system_admin', 'finance_reviewer')
-     LIMIT 1`,
-  ).bind(reviewerUserId).first<{ id: string; display_name: string }>();
+  const reviewer = await reimbursementReviewers(c.env, reviewerUserId).first<{ id: string; display_name: string }>();
   if (!reviewer) return problem(c, 400, 'invalid_reviewer', '审批人必须是具备财务审核权限的在职账号。');
   const requestHash = await sha256Hex(canonicalRequest);
   const action = 'create_reimbursement_batches';
@@ -2364,17 +2378,27 @@ function renderUiRoute(
   const principal = c.get('principal');
   const onePass = c.get('onePassLogin');
   if (!principal) return c.html(renderCorporateAccessRequiredUi(onePass), 401);
+  const managedMembers = onePassOwnsMemberManagement(c.env);
   return c.html(renderAdminUi({
     page,
     principal: { displayName: principal.email, roles: principal.roles },
     trustedBody: options.trustedBody,
     onePass,
+    managedMembers,
+    memberManagementUrl: managedMembers && c.get('canManageOnePassMembers') ? onePassMembersUrl(c.env) : null,
   }), options.status ?? 200);
 }
 
 app.get('/', (c) => renderUiRoute(c, 'dashboard'));
 
-for (const route of ['/subscriptions', '/accounts', '/reimbursements', '/finance', '/rates', '/people', '/profile']) {
+app.get('/people', (c) => {
+  if (!onePassOwnsMemberManagement(c.env)) return renderUiRoute(c, 'people');
+  if (!c.get('principal')) return renderUiRoute(c, 'profile');
+  const url = onePassMembersUrl(c.env);
+  return url ? c.redirect(url, 303) : renderUiRoute(c, 'profile');
+});
+
+for (const route of ['/subscriptions', '/accounts', '/reimbursements', '/finance', '/rates', '/profile']) {
   app.get(route, (c) => renderUiRoute(c, uiPageFromPath(new URL(c.req.url).pathname)));
 }
 

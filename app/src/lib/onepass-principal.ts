@@ -11,13 +11,13 @@ export async function expensePrincipalFromOnePass(db: D1Database, identity: OneP
      WHERE a.org_id = ? AND a.membership_id = ? AND a.enabled = 1 AND u.employment_status = 'active'`,
   ).bind(membership.org_id, membership.id).first<{ user_id: string; email: string | null; role_codes: string }>();
   if (!mapped) return null;
-  const roles = mapped.role_codes.split(',')
-    .filter((role): role is AppRole => APP_ROLES.includes(role as AppRole)).sort();
+  const roles = membership.application_roles ?? mapped.role_codes.split(',')
+    .filter((role): role is AppRole => APP_ROLES.includes(role as AppRole));
   return {
     issuer: 'onepass',
     subject: membership.id,
     userId: mapped.user_id,
     ...(mapped.email ? { email: mapped.email } : {}),
-    roles,
+    roles: [...roles].sort(),
   };
 }
