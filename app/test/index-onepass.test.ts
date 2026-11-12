@@ -166,3 +166,79 @@ it('validates signed organization, entitlement and member events before linking 
   expect((await req('/auth/onepass/logout', { method: 'POST', headers: { cookie, origin: expense } })).status).toBe(303);
   expect((await req('/api/session', { headers: { cookie } })).status).toBe(401);
 });
+
+it('uses live OnePass unlimited mode without a billing entitlement while retaining organization and member checks', async () => {
+  const { db, identity, req } = setup();
+  db.prepare('INSERT INTO onepass_org(org_id) VALUES(?)').run(org);
+  db.prepare('INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id) VALUES(?,?,?,?,1,1,?)')
+    .run(membership, org, applicationUser, 'administrator', crypto.randomUUID());
+  db.prepare('INSERT INTO onepass_local_accounts(org_id,membership_id,user_id) VALUES(?,?,?)').run(org, membership, localUser);
+  const headers = { cookie: '__Host-onepass_session=' + identity.session_id };
+  expect((await req('/api/session', { headers })).status).toBe(401); // legacy response requires entitlement
+  identity.access_model = 'unlimited';
+  expect((await req('/api/session', { headers })).status).toBe(200);
+  expect((await req('/api/finance/overview', { headers })).status).toBe(403); // local business roles remain independent
+  db.prepare('UPDATE onepass_grants SET enabled=0 WHERE membership_id=?').run(membership);
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  db.prepare('UPDATE onepass_grants SET enabled=1 WHERE membership_id=?').run(membership);
+  identity.membership.org_id = 'other_org';
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  identity.membership.org_id = org;
+  (identity as unknown as { access_model: string }).access_model = 'invalid';
+  expect((await req('/api/session', { headers })).status).toBe(401);
+});
+
+it('provisions only new verified members and never claims an existing Expense account', async () => {
+  const { db, env, req } = setup();
+  const scope = { product_code: env.ONEPASS_PRODUCT_CODE, org_id: org, environment: 'test', instance_id: instance };
+  expect((await req(path, await signedEvent(env, { ...scope, protocol_version: 1, type: 'organization.provision', event_id: crypto.randomUUID() }))).status).toBe(200);
+  const member = crypto.randomUUID(), appUser = crypto.randomUUID();
+  const grant = { ...scope, protocol_version: 2, type: 'membership.set', event_id: crypto.randomUUID(),
+    membership_id: member, application_user_id: appUser, role: 'member', enabled: true, version: 1,
+    provisioning: { mode: 'new', verified_email: 'new@lancloudtech.com', name: 'New fixture' } };
+  let response = await req(path, await signedEvent(env, grant));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ result: 'applied', local_account_ready: true });
+  const mapping = db.prepare('SELECT user_id FROM onepass_local_accounts WHERE org_id=? AND membership_id=?').get(org, member) as { user_id: string };
+  expect(db.prepare('SELECT email,display_name FROM users WHERE id=?').get(mapping.user_id)).toEqual({ email: 'new@lancloudtech.com', display_name: 'New fixture' });
+  expect(db.prepare('SELECT role_id FROM user_roles WHERE user_id=?').all(mapping.user_id)).toEqual([{ role_id: 'role-employee' }]);
+  expect((await req(path, await signedEvent(env, grant))).status).toBe(200);
+  expect(db.prepare('SELECT count(*) AS count FROM users WHERE email=?').get('new@lancloudtech.com')).toEqual({ count: 1 });
+  expect(db.prepare("SELECT count(*) AS count FROM audit_events WHERE action='onepass_create_user' AND entity_id=?").get(mapping.user_id)).toEqual({ count: 1 });
+
+  db.prepare("INSERT INTO users(id,email,display_name) VALUES('existing','existing@lancloudtech.com','Existing')").run();
+  const conflict = { ...grant, event_id: crypto.randomUUID(), membership_id: crypto.randomUUID(), application_user_id: crypto.randomUUID(),
+    provisioning: { mode: 'new', verified_email: 'existing@lancloudtech.com', name: 'Conflict' } };
+  response = await req(path, await signedEvent(env, conflict));
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: { code: 'ACCOUNT_LINK_REQUIRED' } });
+  expect(db.prepare('SELECT count(*) AS count FROM onepass_local_accounts WHERE membership_id=?').get(conflict.membership_id)).toEqual({ count: 0 });
+  expect(db.prepare('SELECT count(*) AS count FROM onepass_grants WHERE membership_id=?').get(conflict.membership_id)).toEqual({ count: 0 });
+  const initialAdmin = { ...conflict, event_id: crypto.randomUUID(), role: 'administrator',
+    provisioning: { mode: 'new', verified_email: 'admin@lancloudtech.com', name: 'Admin' } };
+  expect((await req(path, await signedEvent(env, initialAdmin))).status).toBe(200);
+  const adminMapping = db.prepare('SELECT user_id FROM onepass_local_accounts WHERE org_id=? AND membership_id=?').get(org,initialAdmin.membership_id) as { user_id: string };
+  expect(db.prepare('SELECT role_id FROM user_roles WHERE user_id=?').all(adminMapping.user_id)).toEqual([{ role_id: 'role-employee' }]);
+  expect((await req(path, await signedEvent(env, { ...grant, event_id: crypto.randomUUID(), version: 2, enabled: false, provisioning: undefined }))).status).toBe(200);
+  expect(db.prepare('SELECT enabled FROM onepass_grants WHERE membership_id=?').get(member)).toEqual({ enabled: 0 });
+  expect(db.prepare('SELECT employment_status FROM users WHERE id=?').get(mapping.user_id)).toEqual({ employment_status: 'active' });
+});
+
+it('rejects stale v2 provisioning and rolls back a failed local account transaction', async () => {
+  const { db, env, req } = setup();
+  const scope = { product_code: env.ONEPASS_PRODUCT_CODE, org_id: org, environment: 'test', instance_id: instance };
+  expect((await req(path, await signedEvent(env, { ...scope, protocol_version: 1, type: 'organization.provision', event_id: crypto.randomUUID() }))).status).toBe(200);
+  const member = crypto.randomUUID(), appUser = crypto.randomUUID();
+  db.prepare("INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id) VALUES(?,?,?,'member',0,5,?)").run(member, org, appUser, crypto.randomUUID());
+  const event = { ...scope, protocol_version: 2, type: 'membership.set', event_id: crypto.randomUUID(),
+    membership_id: member, application_user_id: appUser, role: 'member', enabled: true, version: 4,
+    provisioning: { mode: 'new', verified_email: 'stale@lancloudtech.com', name: 'Fixture' } };
+  expect((await req(path, await signedEvent(env, event))).status).toBe(403);
+  expect(db.prepare('SELECT count(*) AS count FROM users WHERE email=?').get('stale@lancloudtech.com')).toEqual({ count: 0 });
+  db.exec("CREATE TRIGGER fixture_fail_role BEFORE INSERT ON user_roles BEGIN SELECT RAISE(ABORT,'injected'); END");
+  const failed = { ...event, membership_id: crypto.randomUUID(), application_user_id: crypto.randomUUID(), event_id: crypto.randomUUID(),
+    provisioning: { mode: 'new', verified_email: 'failure@lancloudtech.com', name: 'Fixture' } };
+  expect((await req(path, await signedEvent(env, failed))).status).toBe(503);
+  expect(db.prepare('SELECT count(*) AS count FROM users WHERE email=?').get('failure@lancloudtech.com')).toEqual({ count: 0 });
+  expect(db.prepare('SELECT count(*) AS count FROM onepass_receipts WHERE event_id=?').get(failed.event_id)).toEqual({ count: 0 });
+});
