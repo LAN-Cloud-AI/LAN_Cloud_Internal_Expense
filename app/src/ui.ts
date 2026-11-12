@@ -27,6 +27,7 @@ export interface UiPrincipal {
 export interface UiShellOptions {
   page?: UiPage;
   principal?: UiPrincipal | null;
+  onePass?: boolean;
   /**
    * 仅允许由本服务端生成的可信 HTML。业务数据请通过 JSON API 返回，避免把
    * 来自用户的数据直接拼入 HTML。
@@ -525,7 +526,16 @@ function peoplePage(): string {
   </section>`;
 }
 
-function profilePage(): string {
+const onePassLogout = (className: string) =>
+  `<form method="post" action="/auth/onepass/logout"><button type="submit" class="${className}">登出</button></form>`;
+
+function profilePage(onePass: boolean): string {
+  if (onePass) {
+    return `<section class="surface">
+      ${sectionHeading('登录身份', '使用 OnePass 登录。报销权限由本系统的账号角色决定。')}
+      <div class="form-actions">${onePassLogout('button secondary')}</div>
+    </section>`;
+  }
   return `<section class="surface">
     ${sectionHeading('登录身份', '系统仅支持企业邮箱 OTP 登录（Cloudflare Access 一次性验证码）。每台设备完成验证后 30 天内无需重新登录。')}
     <div class="identity-list">
@@ -541,7 +551,7 @@ function profilePage(): string {
   </section>`;
 }
 
-function pageContent(page: UiPage, employeeOnly: boolean, canManageAccounts: boolean): string {
+function pageContent(page: UiPage, employeeOnly: boolean, canManageAccounts: boolean, onePass: boolean): string {
   switch (page) {
     case 'subscriptions':
       return subscriptionsPage(employeeOnly);
@@ -556,7 +566,7 @@ function pageContent(page: UiPage, employeeOnly: boolean, canManageAccounts: boo
     case 'people':
       return peoplePage();
     case 'profile':
-      return profilePage();
+      return profilePage(onePass);
     default:
       return dashboardPage(employeeOnly);
   }
@@ -591,7 +601,7 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
       <span class="nav-icon" aria-hidden="true">${item.icon}</span><span><strong>${item.label}</strong><small>${item.description}</small></span>
     </a>`;
   }).join('');
-  const body = options.trustedBody ?? pageContent(page, employeeOnly, canManageAccounts);
+  const body = options.trustedBody ?? pageContent(page, employeeOnly, canManageAccounts, options.onePass === true);
   const api = employeeOnly
     ? EMPLOYEE_UI_API_CONTRACT
     : canManageAccounts ? UI_API_CONTRACT : READ_ONLY_ACCOUNT_UI_API_CONTRACT;
@@ -618,7 +628,7 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
         <div><p class="eyebrow">${meta.eyebrow}</p><h1>${meta.title}</h1><p class="page-description">${meta.description}</p></div>
         <div class="topbar-side">
           <div class="identity" title="角色由 D1 中的授权关系决定"><span class="avatar">${escapeHtml(userLabel.slice(0, 1).toUpperCase())}</span><span><strong>${escapeHtml(userLabel)}</strong><small>${escapeHtml(roles)}</small></span></div>
-          <a class="logout-link" href="/logout" title="经 Cloudflare Access 登出所有入口的会话">登出</a>
+          ${options.onePass ? onePassLogout('logout-link') : '<a class="logout-link" href="/logout" title="经 Cloudflare Access 登出所有入口的会话">登出</a>'}
         </div>
       </header>
       <div class="page-content">${body}</div>
@@ -632,7 +642,15 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
 }
 
 /** A controlled corporate-entry response when Access did not yield a business principal. */
-export function renderCorporateAccessRequiredUi(): string {
+export function renderCorporateAccessRequiredUi(onePass = false, unmapped = false): string {
+  if (onePass) {
+    const content = unmapped
+      ? `<p>当前 OnePass 组织身份没有可用的报销账号。请联系系统管理员，或登出后选择其他身份。</p>${onePassLogout('button secondary')}`
+      : '<p>请选择已关联报销账号的组织身份。</p><a href="/auth/onepass">使用 OnePass 登录</a>';
+    return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>登录 · 兰芯云朵行政</title></head>
+<body><main><h1>登录兰芯云朵行政</h1>${content}</main></body></html>`;
+  }
   return `<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>需要企业登录 · 兰芯云朵行政</title></head>

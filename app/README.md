@@ -67,6 +67,19 @@
 
 系统不持有自建会话，登出由 Cloudflare Access 在边缘完成：页面的「登出」指向 Worker 的 `/logout`，由它 302 到团队域 `/cdn-cgi/access/logout` 撤销全局会话——单应用级登出路径只清本应用会话，其他入口会被 SSO 静默续期，因此不在 UI 暴露。
 
+### OnePass 接入
+
+在接入环境中配置 `ONEPASS_ENABLED=1` 可启用 OnePass 事件接收。`ONEPASS_LOGIN_MODE=access` 保留现有 Cloudflare Access 登录，供上线前接收签名探测和权限事件。将 `ONEPASS_LOGIN_MODE` 切换为 `onepass` 后，业务请求使用 OnePass 会话。未配置该选项时，`ONEPASS_ENABLED=1` 也会选择 OnePass 登录。
+
+Worker 配置包括 `ONEPASS_ORIGIN`、`ONEPASS_CLIENT_ID`、`ONEPASS_REDIRECT_URI`、`ONEPASS_PRODUCT_CODE`、`ONEPASS_ENVIRONMENT`、`ONEPASS_INSTANCE_ID`、`ONEPASS_ORG_ID` 和 `ONEPASS_DELIVERY_KEY_ID`。`ONEPASS_CLIENT_SECRET` 与 `ONEPASS_DELIVERY_SECRET` 通过 Worker Secrets 配置。
+
+在启用前，由管理员把已核实的 OnePass 组织 ID、成员 ID 和本系统现有用户 ID 写入 `onepass_local_accounts`。映射要求一人一条。OnePass 签发会话、成员授权和有效订阅是登录前提，实际资产、报销、财务和系统管理权限读取 D1 现有的 `user_roles`。禁用本地映射或停用本地账号会阻止随后访问。启用 OnePass 登录后，登出使用同源 POST 并撤销 OnePass 应用会话。
+
+1. 备份生产 D1 并在隔离数据库验证恢复，再应用 `0018_onepass_integration.sql` 和 `0019_onepass_local_accounts.sql`。在 OnePass 登记 Web 客户端、精确回调 `https://ie-oa.lancloudtech.com/auth/onepass/callback` 与签名事件接收端 `https://ie-oa.lancloudtech.com/api/internal/onepass/events`。只为已确认的组织开通 Basic 和成员访问。
+2. 以 `ONEPASS_ENABLED=1`、`ONEPASS_LOGIN_MODE=access` 部署 Worker，保留企业入口的 Access 策略。只让签名事件路径绕过 Access，确认无签名请求被拒绝、OnePass 签名探测成功，企业登录和资产 API 仍按现有规则工作。 [Cloudflare 路径策略](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)
+3. 在本地账号映射、应用权限和订阅同步核验后，先把 Worker 改为 `ONEPASS_LOGIN_MODE=onepass`，再取消企业入口的 Access 登录要求，让浏览器可到达 OnePass 登录和回调。保留旧 `ie_oa` 入口的 Access 保护。核对匿名业务 API、未映射账号、已有角色账号和登出行为。
+4. 回退时先恢复企业入口的 Access 保护，再切回 `ONEPASS_LOGIN_MODE=access`。同时关闭签名事件路径的例外后，可取消 `ONEPASS_ENABLED`。保留 D1 账本及追加迁移。
+
 ## 轻量化部署配置（Cloudflare）
 
 本系统采用同一 Worker/D1/R2 的单入口架构，部署、验收和回滚顺序见 [Cloudflare Access 上线手册](../docs/runbooks/cloudflare-access-dual-entry.md)。执行前不得假设资源已存在或生产已上线。

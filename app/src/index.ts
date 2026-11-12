@@ -13,7 +13,7 @@ import {
   type AuthenticatedIdentity,
   type Principal,
 } from './lib/auth';
-import { accessEntryForRequest, isAllowedEntryOrigin, normalizeVerifiedEmail, type AccessEntry } from './lib/access-entry';
+import { accessEntryForRequest, isAllowedEntryOrigin, normalizeVerifiedEmail, onePassLoginEnabled, type AccessEntry } from './lib/access-entry';
 import { IdentityProblem, IdentityStore } from './lib/identity-store';
 import { fetchCnyRate, rateToMinorUnitRational } from './lib/fx';
 import {
@@ -34,6 +34,8 @@ import {
   type PersistedCandidateForSubmission,
 } from './lib/reimbursement-submission';
 import type { Env } from './lib/types';
+import { handleOnePass, onePassEnabled, onePassIdentity } from './lib/onepass';
+import { expensePrincipalFromOnePass } from './lib/onepass-principal';
 import {
   renderAdminUi,
   renderCorporateAccessRequiredUi,
@@ -191,7 +193,8 @@ function requireRoles(
   const originFailure = ensureMutationOrigin(c);
   if (originFailure) return originFailure;
   const principal = c.get('principal');
-  if (!principal) return problem(c, 401, 'authentication_required', '需要通过 Cloudflare Access 登录并分配系统角色。');
+  if (!principal) return problem(c, 401, 'authentication_required', onePassLoginEnabled(c.env)
+    ? '请使用已关联本系统账号的 OnePass 组织身份登录。' : '需要通过 Cloudflare Access 登录并分配系统角色。');
   if (!hasAnyRole(principal, roles)) {
     return problem(c, 403, 'insufficient_role', '当前角色没有执行该操作的权限。');
   }
@@ -295,8 +298,7 @@ async function pendingCandidatesForSelection(
   return candidates;
 }
 
-async function fetchMonthlyPaidSeries(env: Env): Promise<Array<{ month: string; total_cny_fen: number }>> {
-  const today = shanghaiBusinessDate();
+async function fetchMonthlyPaidSeries(env: Env, today = shanghaiBusinessDate()): Promise<Array<{ month: string; total_cny_fen: number }>> {
   const monthIndex = Number(today.slice(0, 4)) * 12 + Number(today.slice(5, 7)) - 1 - 11;
   const startMonth = `${Math.floor(monthIndex / 12)}-${String((monthIndex % 12) + 1).padStart(2, '0')}-01`;
   const rows = await env.DB.prepare(
@@ -908,7 +910,6 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
     c.set('entry', entry);
 
     c.set('principal', null);
-    c.set('principal', null);
 
     if (entry.kind === 'legacy') {
       if (c.req.method === 'GET' || c.req.method === 'HEAD') {
@@ -918,6 +919,24 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
     }
 
     if (c.req.path === '/api/health') return next();
+
+    const onePassLogin = onePassLoginEnabled(c.env);
+    if (onePassEnabled(c.env) && (onePassLogin || c.req.path === '/api/internal/onepass/events')) {
+      const response = await handleOnePass(c.req.raw, c.env);
+      if (response) return response;
+    }
+    if (onePassLogin) {
+      const identity = await onePassIdentity(c.req.raw, c.env);
+      if (identity) {
+        const principal = await expensePrincipalFromOnePass(c.env.DB, identity);
+        if (!principal) {
+          if (c.req.path.startsWith('/api/')) return problem(c, 403, 'onepass_membership_not_mapped', '此 OnePass 组织身份尚未关联可用的报销账号。');
+          return c.html(renderCorporateAccessRequiredUi(true, true), 403);
+        }
+        c.set('principal', principal);
+      }
+      return next();
+    }
 
     try {
       const identity = await resolveIdentity(c.req.raw, c.env, entry);
@@ -947,6 +966,7 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
 // 应用级 /cdn-cgi/access/logout 只清本应用会话；全局（团队域）会话仍在，
 // 其他入口会被 SSO 静默续期。真正的“登出所有入口”必须跳团队域登出。
 app.get('/logout', (c) => {
+  if (onePassLoginEnabled(c.env)) return c.redirect('/profile', 303);
   const issuer = c.env.ACCESS_ISSUER?.replace(/\/+$/, '');
   if (issuer) return c.redirect(`${issuer}/cdn-cgi/access/logout`, 302);
   return c.redirect('/cdn-cgi/access/logout', 302);
@@ -1045,7 +1065,7 @@ app.get('/api/dashboard', async (c) => {
 app.get('/api/finance/overview', async (c) => {
   const auth = requireRoles(c, ['system_admin', 'finance_reviewer', 'auditor']);
   if (isResponse(auth)) return auth;
-  const today = shanghaiBusinessDate();
+  const today = shanghaiBusinessDate(now());
   const year = today.slice(0, 4);
   const month = today.slice(0, 7);
   const quarterStartMonth = String(Math.floor((Number(today.slice(5, 7)) - 1) / 3) * 3 + 1).padStart(2, '0');
@@ -1087,7 +1107,7 @@ app.get('/api/finance/overview', async (c) => {
       paid_year: { period: year, ...(results[3]?.results[0] ?? { count: 0, total_cny_fen: 0 }) },
       paid_quarter: { period: `${year}-Q${String(Math.floor((Number(today.slice(5, 7)) - 1) / 3) + 1)}`, ...(results[4]?.results[0] ?? { count: 0, total_cny_fen: 0 }) },
       paid_month: { period: month, ...(results[5]?.results[0] ?? { count: 0, total_cny_fen: 0 }) },
-      monthly_paid: await fetchMonthlyPaidSeries(c.env),
+      monthly_paid: await fetchMonthlyPaidSeries(c.env, today),
     },
   });
 });
@@ -2334,11 +2354,13 @@ function renderUiRoute(
   options: { status?: 200 | 404; trustedBody?: string } = {},
 ): Response {
   const principal = c.get('principal');
-  if (!principal) return c.html(renderCorporateAccessRequiredUi(), 401);
+  const onePass = onePassLoginEnabled(c.env);
+  if (!principal) return c.html(renderCorporateAccessRequiredUi(onePass), 401);
   return c.html(renderAdminUi({
     page,
     principal: { displayName: principal.email, roles: principal.roles },
     trustedBody: options.trustedBody,
+    onePass,
   }), options.status ?? 200);
 }
 

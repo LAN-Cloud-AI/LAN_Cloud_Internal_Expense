@@ -1,4 +1,5 @@
 import type { Env } from './types';
+import { onePassEnabled } from './onepass';
 
 export type AccessEntryKind = 'corporate' | 'legacy';
 
@@ -16,13 +17,17 @@ function hostnameWithoutPort(host: string): string {
   return host.trim().toLowerCase().replace(/:\d+$/, '');
 }
 
+export function onePassLoginEnabled(env: Env): boolean {
+  return onePassEnabled(env) && env.ONEPASS_LOGIN_MODE !== 'access';
+}
+
 export function accessEntryForRequest(host: string, env: Env): AccessEntry | null {
   const hostname = hostnameWithoutPort(host);
-  if (hostname === CORPORATE_HOSTNAME && env.ACCESS_AUD_CORPORATE) {
+  if (hostname === CORPORATE_HOSTNAME && (env.ACCESS_AUD_CORPORATE || onePassLoginEnabled(env))) {
     return {
       kind: 'corporate',
       hostname: CORPORATE_HOSTNAME,
-      audience: env.ACCESS_AUD_CORPORATE,
+      audience: env.ACCESS_AUD_CORPORATE ?? '',
       origin: `https://${CORPORATE_HOSTNAME}`,
     };
   }
