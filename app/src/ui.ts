@@ -28,6 +28,8 @@ export interface UiShellOptions {
   page?: UiPage;
   principal?: UiPrincipal | null;
   onePass?: boolean;
+  managedMembers?: boolean;
+  memberManagementUrl?: string | null;
   /**
    * 仅允许由本服务端生成的可信 HTML。业务数据请通过 JSON API 返回，避免把
    * 来自用户的数据直接拼入 HTML。
@@ -66,6 +68,15 @@ const {
   accountOperational: _accountOperational,
   accountOwners: _accountOwners,
   ...READ_ONLY_ACCOUNT_UI_API_CONTRACT
+} = UI_API_CONTRACT;
+
+const {
+  users: _users,
+  userOperational: _userOperational,
+  roles: _roles,
+  loginWhitelist: _loginWhitelist,
+  loginWhitelistDelete: _loginWhitelistDelete,
+  ...MANAGED_MEMBER_UI_API_CONTRACT
 } = UI_API_CONTRACT;
 
 const EMPLOYEE_UI_API_CONTRACT = {
@@ -529,11 +540,13 @@ function peoplePage(onePass: boolean): string {
 const onePassLogout = (className: string) =>
   `<form method="post" action="/auth/onepass/logout"><button type="submit" class="${className}">登出</button></form>`;
 
-function profilePage(onePass: boolean): string {
+function profilePage(options: UiShellOptions): string {
+  const { onePass, managedMembers, memberManagementUrl } = options;
   if (onePass) {
     return `<section class="surface">
-      ${sectionHeading('登录身份', '使用 OnePass 登录。报销权限由本系统的账号角色决定。')}
-      <div class="form-actions">${onePassLogout('button secondary')}</div>
+      ${sectionHeading('登录身份', managedMembers ? '登录、成员和角色由 OnePass 管理。' : '使用 OnePass 登录。报销权限由本系统的账号角色决定。')}
+      <div class="form-actions">${managedMembers && memberManagementUrl
+        ? `<a class="button primary" href="${escapeHtml(memberManagementUrl)}">前往 OnePass 管理成员</a>` : ''}${onePassLogout('button secondary')}</div>
     </section>`;
   }
   return `<section class="surface">
@@ -551,7 +564,7 @@ function profilePage(onePass: boolean): string {
   </section>`;
 }
 
-function pageContent(page: UiPage, employeeOnly: boolean, canManageAccounts: boolean, onePass: boolean): string {
+function pageContent(page: UiPage, employeeOnly: boolean, canManageAccounts: boolean, options: UiShellOptions): string {
   switch (page) {
     case 'subscriptions':
       return subscriptionsPage(employeeOnly);
@@ -564,9 +577,9 @@ function pageContent(page: UiPage, employeeOnly: boolean, canManageAccounts: boo
     case 'rates':
       return ratesPage();
     case 'people':
-      return peoplePage(onePass);
+      return peoplePage(options.onePass === true);
     case 'profile':
-      return profilePage(onePass);
+      return profilePage(options);
     default:
       return dashboardPage(employeeOnly);
   }
@@ -583,7 +596,8 @@ export function uiPageFromPath(pathname: string): UiPage {
 export function renderAdminUi(options: UiShellOptions = {}): string {
   const employeeOnly = isEmployeeOnly(options.principal);
   const canManageAccounts = canManageAccountAssets(options.principal);
-  const requestedPage = options.page ?? 'dashboard';
+  const managedMembers = options.managedMembers === true;
+  const requestedPage = managedMembers && options.page === 'people' ? 'profile' : options.page ?? 'dashboard';
   const financeDenied = requestedPage === 'finance' && !canViewFinance(options.principal);
   const page = (employeeOnly && !EMPLOYEE_PAGES.includes(requestedPage)) || financeDenied ? 'dashboard' : requestedPage;
   const meta = employeeOnly && page === 'dashboard'
@@ -592,6 +606,7 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
   const userLabel = options.principal?.displayName?.trim() || '未识别用户';
   const roles = options.principal?.roles?.length ? options.principal.roles.join(' · ') : '未分配角色';
   const navigation = NAV_ITEMS.filter((item) => {
+    if (managedMembers && item.page === 'people') return false;
     if (employeeOnly) return EMPLOYEE_PAGES.includes(item.page);
     if (item.page === 'finance') return canViewFinance(options.principal);
     return true;
@@ -601,10 +616,17 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
       <span class="nav-icon" aria-hidden="true">${item.icon}</span><span><strong>${item.label}</strong><small>${item.description}</small></span>
     </a>`;
   }).join('');
-  const body = options.trustedBody ?? pageContent(page, employeeOnly, canManageAccounts, options.onePass === true);
+  const body = options.trustedBody ?? pageContent(page, employeeOnly, canManageAccounts, options);
+  const {
+    accountOperational: _managedAccountOperational,
+    accountOwners: _managedAccountOwners,
+    ...readOnlyManagedMemberApi
+  } = MANAGED_MEMBER_UI_API_CONTRACT;
   const api = employeeOnly
     ? EMPLOYEE_UI_API_CONTRACT
-    : canManageAccounts ? UI_API_CONTRACT : READ_ONLY_ACCOUNT_UI_API_CONTRACT;
+    : managedMembers
+      ? canManageAccounts ? MANAGED_MEMBER_UI_API_CONTRACT : readOnlyManagedMemberApi
+      : canManageAccounts ? UI_API_CONTRACT : READ_ONLY_ACCOUNT_UI_API_CONTRACT;
   const boot = jsonForInlineScript({ page, roles: options.principal?.roles ?? [], api });
 
   return `<!doctype html>
@@ -627,7 +649,7 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
       <header class="topbar">
         <div><p class="eyebrow">${meta.eyebrow}</p><h1>${meta.title}</h1><p class="page-description">${meta.description}</p></div>
         <div class="topbar-side">
-          <div class="identity" title="角色由 D1 中的授权关系决定"><span class="avatar">${escapeHtml(userLabel.slice(0, 1).toUpperCase())}</span><span><strong>${escapeHtml(userLabel)}</strong><small>${escapeHtml(roles)}</small></span></div>
+          <div class="identity" title="${managedMembers ? '角色由 OnePass 管理' : '角色由 D1 中的授权关系决定'}"><span class="avatar">${escapeHtml(userLabel.slice(0, 1).toUpperCase())}</span><span><strong>${escapeHtml(userLabel)}</strong><small>${escapeHtml(roles)}</small></span></div>
           ${options.onePass ? onePassLogout('logout-link') : '<a class="logout-link" href="/logout" title="经 Cloudflare Access 登出所有入口的会话">登出</a>'}
         </div>
       </header>
@@ -636,7 +658,7 @@ export function renderAdminUi(options: UiShellOptions = {}): string {
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script>window.__LAN_CLOUD_UI__ = ${boot};</script>
-  <script>${clientScript(canManageAccounts)}</script>
+  <script>${clientScript(canManageAccounts, managedMembers)}</script>
 </body>
 </html>`;
 }
@@ -691,7 +713,7 @@ function styles(): string {
   `;
 }
 
-function clientScript(canManageAccounts: boolean): string {
+function clientScript(canManageAccounts: boolean, managedMembers: boolean): string {
   return `
     (() => {
       const config = window.__LAN_CLOUD_UI__ || {};
@@ -739,11 +761,13 @@ function clientScript(canManageAccounts: boolean): string {
         return [];
       };
       const optionSources = {
+        ${managedMembers ? (canManageAccounts ? `users: { url: () => api.accountOwners, value: 'id', label: (row) => String(row.display_name || '') },
+        'active-users': { url: () => api.accountOwners + '?active=1', value: 'id', label: (row) => String(row.display_name || '') },` : '') : `
         users: { url: () => api.users, value: 'id', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
         'active-users': { url: () => api.users, value: 'id', filter: (row) => row.employment_status === 'active', label: (row) => String(row.display_name || '') + (row.email ? ' · ' + row.email : '') },
+        roles: { url: () => api.roles, value: 'code', label: (row) => String(row.display_name || '') + ' · ' + String(row.code || '') },`}
         ${canManageAccounts ? "'account-owners': { url: () => api.accountOwners, value: 'id', label: (row) => String(row.display_name || '') }," : ''}
-        reviewers: { url: () => api.reimbursementReviewers, value: 'id', label: (row) => String(row.display_name || '') },
-        roles: { url: () => api.roles, value: 'code', label: (row) => String(row.display_name || '') + ' · ' + String(row.code || '') }
+        reviewers: { url: () => api.reimbursementReviewers, value: 'id', label: (row) => String(row.display_name || '') }
       };
       ${canManageAccounts ? `const applyPendingSelectValue = (select) => {
         if (select.dataset.pendingValue === undefined) return;

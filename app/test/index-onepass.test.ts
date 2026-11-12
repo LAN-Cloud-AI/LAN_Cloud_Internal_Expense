@@ -312,3 +312,88 @@ it('retires obsolete Access whitelist endpoints in OnePass mode without altering
   expect((await req('/api/login-whitelist/fixture',{method:'DELETE',headers})).status).toBe(410);
   expect(db.prepare('SELECT count(*) AS count FROM login_whitelist').get()).toEqual(before);
 });
+
+it('freezes local member management during migration and enforces signed roles after cutover', async () => {
+  const { db, env, identity, req } = setup();
+  identity.access_model = 'unlimited';
+  const scope = { product_code: env.ONEPASS_PRODUCT_CODE, org_id: org, environment: 'test', instance_id: instance, protocol_version: 1 };
+  const grant = { ...scope, type: 'membership.set', membership_id: membership, application_user_id: applicationUser,
+    role: 'administrator', enabled: true, version: 1, event_id: crypto.randomUUID() };
+  const deliver = async (event: object) => req(path, await signedEvent(env, event));
+  const headers = { cookie: '__Host-onepass_session=' + identity.session_id, origin: expense };
+  expect((await deliver({ ...scope, type: 'organization.provision', event_id: crypto.randomUUID() })).status).toBe(200);
+  expect((await deliver(grant)).status).toBe(200);
+  db.prepare('INSERT INTO onepass_local_accounts(org_id,membership_id,user_id) VALUES(?,?,?)').run(org, membership, localUser);
+  db.prepare("INSERT INTO user_roles(user_id,role_id) VALUES(?,'role-system-admin')").run(localUser);
+  db.prepare("INSERT INTO users(id,display_name,employment_status) VALUES('historical','Historical','inactive')").run();
+
+  env.ONEPASS_MANAGED_MEMBER_ROLES = 'staging';
+  expect((await req('/api/finance/overview', { headers })).status).toBe(200);
+  expect(await (await req('/profile', { headers })).text()).not.toContain('前往 OnePass 管理成员');
+  for (const [method, api] of [
+    ['GET', '/api/users'], ['POST', '/api/users'], ['PUT', '/api/users/expense-local'],
+    ['PUT', '/api/users/expense-local/roles'], ['GET', '/api/roles'], ['POST', '/api/login-whitelist'],
+  ]) expect((await req(api!, { method, headers })).status).toBe(410);
+  const people = await req('/people', { headers, redirect: 'manual' });
+  expect(people.status).toBe(303);
+  expect(people.headers.get('location')).toBe(`${center}/products/expense-fixture/environments/test/members?org=${org}`);
+  expect(await (await req('/api/account-owners?active=1', { headers })).json()).toEqual({
+    data: [{ id: localUser, display_name: 'Expense fixture' }],
+  });
+
+  env.ONEPASS_MANAGED_MEMBER_ROLES = '1';
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  identity.membership.application_roles = ['finance_reviewer', 'employee'];
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  const imported = { ...grant, version: 2, event_id: crypto.randomUUID(), application_roles: ['employee', 'finance_reviewer'] };
+  const receipt = await deliver(imported);
+  expect(receipt.status).toBe(200);
+  expect(await receipt.json()).toMatchObject({ application_roles: imported.application_roles });
+  expect((await deliver(imported)).status).toBe(200);
+  expect((await req('/api/finance/overview', { headers })).status).toBe(200);
+  expect(await (await req('/api/session', { headers })).json()).toMatchObject({
+    data: { user_id: localUser, roles: ['employee', 'finance_reviewer'] },
+  });
+  expect(await (await req('/api/reimbursements/reviewers', { headers })).json()).toMatchObject({ data: [{ id: localUser }] });
+
+  const revoked = { ...imported, version: 3, event_id: crypto.randomUUID(), application_roles: ['employee'] };
+  expect((await deliver({ ...revoked, application_roles: ['unknown'] })).status).toBe(403);
+  expect((await deliver({ ...revoked, application_roles: ['employee', 'employee'] })).status).toBe(403);
+  expect((await deliver({ ...revoked, application_roles: undefined })).status).toBe(403);
+  expect((await deliver(revoked)).status).toBe(200);
+  expect((await deliver(imported)).status).toBe(403);
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  identity.membership.application_roles = ['employee'];
+  identity.membership.org_role = 'org_admin';
+  expect((await req('/api/finance/overview', { headers })).status).toBe(403);
+  expect(await (await req('/profile', { headers })).text()).toContain('前往 OnePass 管理成员');
+  expect(await (await req('/api/reimbursements/reviewers', { headers })).json()).toEqual({ data: [] });
+  expect(db.prepare("SELECT role_id FROM user_roles WHERE user_id=? AND role_id='role-system-admin'").get(localUser)).toBeTruthy();
+
+  const empty = await deliver({ ...revoked, event_id: crypto.randomUUID(), version: 4, application_roles: [] });
+  expect(await empty.json()).toMatchObject({ application_roles: [] });
+  identity.membership.application_roles = [];
+  expect(await (await req('/api/session', { headers })).json()).toMatchObject({ data: { roles: [] } });
+  expect((await req('/api/dashboard', { headers })).status).toBe(403);
+});
+
+it('accepts central v2 roles for new accounts and requires an explicit mapping for existing accounts', async () => {
+  const { db, env, req } = setup();
+  env.ONEPASS_MANAGED_MEMBER_ROLES = '1';
+  const scope = { product_code: env.ONEPASS_PRODUCT_CODE, org_id: org, environment: 'test', instance_id: instance };
+  const deliver = async (event: object) => req(path, await signedEvent(env, event));
+  expect((await deliver({ ...scope, type: 'organization.provision', protocol_version: 1, event_id: crypto.randomUUID() })).status).toBe(200);
+  const grant = { ...scope, type: 'membership.set', membership_id: membership, application_user_id: applicationUser,
+    role: 'member', enabled: true, version: 1, event_id: crypto.randomUUID(), application_roles: ['employee'] };
+  const noMapping = await deliver({ ...grant, protocol_version: 1 });
+  expect(noMapping.status).toBe(409);
+  expect(await noMapping.json()).toMatchObject({ error: { code: 'ACCOUNT_LINK_REQUIRED' } });
+  const provisioned = await deliver({ ...grant, event_id: crypto.randomUUID(), protocol_version: 2,
+    provisioning: { mode: 'new', verified_email: 'managed@lancloudtech.com', name: 'Managed fixture' } });
+  expect(provisioned.status).toBe(200);
+  expect(await provisioned.json()).toMatchObject({ local_account_ready: true, application_roles: ['employee'] });
+  expect(db.prepare('SELECT application_roles_json FROM onepass_grants WHERE membership_id=?').get(membership))
+    .toEqual({ application_roles_json: '["employee"]' });
+  expect(db.prepare(`SELECT count(*) AS count FROM user_roles r JOIN onepass_local_accounts a ON a.user_id=r.user_id`).get())
+    .toEqual({ count: 0 });
+});

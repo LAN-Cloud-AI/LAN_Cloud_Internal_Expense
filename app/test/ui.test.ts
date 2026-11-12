@@ -402,3 +402,15 @@ it('OnePass profile describes login and has no legacy identity binding controls'
   expect(page).not.toContain('Cloudflare Access');
   expect(page).not.toContain('GitHub');
 });
+
+it('removes the local people UI and keeps business ownership options after OnePass cutover', () => {
+  const principal = { displayName: 'fixture', roles: ['system_admin'] };
+  const people = ui.renderAdminUi({ page: 'people', principal, onePass: true, managedMembers: true });
+  expect(people).not.toContain('href="/people"');
+  expect(people).not.toContain('data-api="user-roles"');
+  expect(people).not.toContain('/api/users');
+  expect(people).toContain('登录、成员和角色由 OnePass 管理。');
+  const subscriptions = ui.renderAdminUi({ page: 'subscriptions', principal, onePass: true, managedMembers: true });
+  expect(subscriptions).toContain('/api/account-owners');
+  expect(subscriptions).toContain("api.accountOwners + '?active=1'");
+});

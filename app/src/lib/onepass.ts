@@ -1,4 +1,6 @@
-// OnePass Worker adapter: signed identity and optional verified-email provisioning.
+// OnePass Worker adapter: signed identity, role projection and optional provisioning.
+import { APP_ROLES, type AppRole } from './auth';
+
 export interface OnePassEnv {
   DB: D1Database;
   ONEPASS_ENABLED?: string;
@@ -12,6 +14,7 @@ export interface OnePassEnv {
   ONEPASS_ORG_ID?: string;
   ONEPASS_DELIVERY_KEY_ID?: string;
   ONEPASS_DELIVERY_SECRET?: string;
+  ONEPASS_MANAGED_MEMBER_ROLES?: 'staging' | '1';
 }
 
 export interface OnePassIdentity {
@@ -21,7 +24,7 @@ export interface OnePassIdentity {
   expires_at: string;
   application_user_id: string;
   user: {id: string; name: string};
-  membership: {id: string; org_id: string; role: string};
+  membership: {id: string; org_id: string; role: string; org_role?: string; application_roles?: AppRole[]};
 }
 
 const uuid = (value: unknown): value is string =>
@@ -36,6 +39,17 @@ const forbidden = () => new Response('OnePass 授权无效',{status:403,headers:
 const linkRequired = () => Response.json({error:{code:'ACCOUNT_LINK_REQUIRED'}},{status:409,headers:{'cache-control':'no-store'}});
 const unavailable = () => new Response('OnePass 暂不可用',{status:503,headers:{'cache-control':'no-store'}});
 export const onePassEnabled = (env:OnePassEnv) => env.ONEPASS_ENABLED==='1';
+export const onePassOwnsMemberManagement = (env: OnePassEnv) =>
+  env.ONEPASS_MANAGED_MEMBER_ROLES === 'staging' || env.ONEPASS_MANAGED_MEMBER_ROLES === '1';
+
+function isApplicationRoles(value: unknown): value is AppRole[] {
+  return Array.isArray(value) && value.length <= APP_ROLES.length &&
+    new Set(value).size === value.length && value.every(role => APP_ROLES.includes(role));
+}
+
+function encodeApplicationRoles(roles: AppRole[] | undefined): string | null {
+  return roles === undefined ? null : JSON.stringify([...roles].sort());
+}
 
 function config(env:OnePassEnv) {
   if(!onePassEnabled(env)||!env.ONEPASS_ORIGIN||!env.ONEPASS_REDIRECT_URI||!env.ONEPASS_CLIENT_ID||!token(env.ONEPASS_CLIENT_SECRET)||
@@ -50,6 +64,17 @@ function config(env:OnePassEnv) {
   const raw=Uint8Array.from(atob(env.ONEPASS_DELIVERY_SECRET),c=>c.charCodeAt(0));
   if(raw.length!==32) throw Error('OnePass signing key invalid');
   return {origin,redirect,raw,clientId:env.ONEPASS_CLIENT_ID,clientSecret:env.ONEPASS_CLIENT_SECRET};
+}
+
+export function onePassMembersUrl(env: OnePassEnv): string | null {
+  try {
+    const { origin } = config(env);
+    const url = new URL(`/products/${encodeURIComponent(env.ONEPASS_PRODUCT_CODE!)}/environments/${env.ONEPASS_ENVIRONMENT}/members`, origin);
+    url.searchParams.set('org', env.ONEPASS_ORG_ID!);
+    return url.href;
+  } catch {
+    return null;
+  }
 }
 
 function cookieName(url:URL,key:string){return (url.protocol==='https:'?'__Host-':'')+'onepass_'+key;}
@@ -76,19 +101,24 @@ function isIdentity(value:unknown,env:OnePassEnv):value is OnePassIdentity {
   const i=value as Partial<OnePassIdentity>;
   return i.active===true&&(i.access_model===undefined||i.access_model==='subscription'||i.access_model==='unlimited')&&uuid(i.session_id)&&uuid(i.application_user_id)&&uuid(i.user?.id)&&
     typeof i.user?.name==='string'&&uuid(i.membership?.id)&&i.membership?.org_id===env.ONEPASS_ORG_ID&&
-    ['administrator','member'].includes(i.membership?.role??'')&&typeof i.expires_at==='string'&&Date.parse(i.expires_at)>Date.now();
+    ['administrator','member'].includes(i.membership?.role??'')&&
+    (i.membership?.application_roles===undefined||isApplicationRoles(i.membership.application_roles))&&
+    typeof i.expires_at==='string'&&Date.parse(i.expires_at)>Date.now();
 }
 async function locallyActive(identity:OnePassIdentity,env:OnePassEnv) {
+  const roles = encodeApplicationRoles(identity.membership.application_roles);
+  if (roles === null && env.ONEPASS_MANAGED_MEMBER_ROLES === '1') return false;
   // This value comes only from the authenticated OnePass session response.
   // Missing is the legacy subscription model; unknown values fail validation.
-  const grantQuery=identity.access_model==='unlimited'
-    ? `SELECT 1 AS active FROM onepass_grants g JOIN onepass_org o ON o.org_id=g.org_id
-       WHERE g.membership_id=? AND g.org_id=? AND g.application_user_id=? AND g.role=? AND g.enabled=1`
-    : `SELECT 1 AS active FROM onepass_grants g JOIN onepass_entitlement e ON e.org_id=g.org_id
-       WHERE g.membership_id=? AND g.org_id=? AND g.application_user_id=? AND g.role=? AND g.enabled=1
-         AND e.status='active' AND julianday(e.period_end)>julianday('now')`;
+  const entitlementCheck = identity.access_model === 'unlimited' ? '' : `AND EXISTS (
+    SELECT 1 FROM onepass_entitlement e WHERE e.org_id = g.org_id
+      AND e.status='active' AND julianday(e.period_end)>julianday('now')
+  )`;
+  const grantQuery = `SELECT 1 AS active FROM onepass_grants g JOIN onepass_org o ON o.org_id=g.org_id
+    WHERE g.membership_id=? AND g.org_id=? AND g.application_user_id=? AND g.role=? AND g.enabled=1
+      AND g.application_roles_json IS ? ${entitlementCheck}`;
   const grant=await env.DB.prepare(grantQuery)
-    .bind(identity.membership.id,identity.membership.org_id,identity.application_user_id,identity.membership.role).first();
+    .bind(identity.membership.id,identity.membership.org_id,identity.application_user_id,identity.membership.role,roles).first();
   return !!grant;
 }
 export async function onePassIdentity(request:Request,env:OnePassEnv):Promise<OnePassIdentity|null> {
@@ -147,12 +177,15 @@ async function eventRequest(request:Request,env:OnePassEnv,cfg:ReturnType<typeof
   }else if(event.type==='membership.set'){
     if(!uuid(event.membership_id)||!uuid(event.application_user_id)||!['administrator','member'].includes(event.role)||
       typeof event.enabled!=='boolean'||!Number.isSafeInteger(event.version)||event.version<1) return forbidden();
+    if (event.application_roles !== undefined && !isApplicationRoles(event.application_roles)) return forbidden();
+    const roles = encodeApplicationRoles(event.application_roles);
+    if (event.enabled && roles === null && env.ONEPASS_MANAGED_MEMBER_ROLES === '1') return forbidden();
+    requiresLocalAccount = event.enabled && (event.protocol_version === 2 || roles !== null);
     if(event.protocol_version===2 && event.enabled){
       const data=event.provisioning;
       const email=typeof data?.verified_email==='string'?data.verified_email.toLowerCase():'';
       if(data?.mode!=='new'||email.length>254||!/^[^@\s\x00-\x1f]+@lancloudtech\.com$/.test(email)||
         typeof data.name!=='string'||!data.name.trim()||data.name.length>80||/[\x00-\x1f\x7f]/.test(data.name)) return forbidden();
-      requiresLocalAccount=true;
       // A stale or conflicting event must never create a local account.
       const previous=await env.DB.prepare('SELECT org_id,application_user_id,version,event_id FROM onepass_grants WHERE membership_id=?')
         .bind(event.membership_id).first<{org_id:string;application_user_id:string;version:number;event_id:string}>();
@@ -165,24 +198,29 @@ async function eventRequest(request:Request,env:OnePassEnv,cfg:ReturnType<typeof
         const userId=crypto.randomUUID();
         provisioning.push(env.DB.prepare(`INSERT INTO users(id,email,display_name,employment_status)
           SELECT ?,?,?,'active' WHERE ${match} AND NOT EXISTS (SELECT 1 FROM onepass_grants WHERE membership_id=? AND (org_id<>? OR application_user_id<>? OR version>=?))`).bind(userId,email,data.name,event.event_id,digest,event.membership_id,orgId,event.application_user_id,event.version));
-        provisioning.push(env.DB.prepare(`INSERT INTO user_roles(user_id,role_id)
-          SELECT ?,'role-employee' WHERE EXISTS(SELECT 1 FROM users WHERE id=?)`)
-          .bind(userId,userId));
+        if (roles === null) {
+          provisioning.push(env.DB.prepare(`INSERT INTO user_roles(user_id,role_id)
+            SELECT ?,'role-employee' WHERE EXISTS(SELECT 1 FROM users WHERE id=?)`)
+            .bind(userId,userId));
+        }
         provisioning.push(env.DB.prepare(`INSERT INTO onepass_local_accounts(org_id,membership_id,user_id)
-          SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM user_roles WHERE user_id=? AND role_id='role-employee')`)
+          SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM users WHERE id=?)`)
           .bind(orgId,event.membership_id,userId,userId));
         provisioning.push(env.DB.prepare(`INSERT INTO audit_events(id,actor_id,action,entity_type,entity_id,detail_json)
           SELECT ?,NULL,'onepass_create_user','user',?,'{}' WHERE EXISTS(SELECT 1 FROM onepass_local_accounts WHERE org_id=? AND membership_id=? AND user_id=?)`)
           .bind(event.event_id,userId,orgId,event.membership_id,userId));
       }
     }
-    const mappingGate=requiresLocalAccount?' AND EXISTS(SELECT 1 FROM onepass_local_accounts WHERE org_id=? AND membership_id=?)':'';
-    action=env.DB.prepare(`INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id)
-      SELECT ?,?,?,?,?,?,? WHERE ${match}${mappingGate} ON CONFLICT(membership_id) DO UPDATE SET
-      role=excluded.role,enabled=excluded.enabled,version=excluded.version,event_id=excluded.event_id
+    const mappingGate=requiresLocalAccount?` AND EXISTS(SELECT 1 FROM onepass_local_accounts a JOIN users u ON u.id=a.user_id
+      WHERE a.org_id=? AND a.membership_id=? AND a.enabled=1 AND u.employment_status='active')`:'';
+    action=env.DB.prepare(`INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id,application_roles_json)
+      SELECT ?,?,?,?,?,?,?,? WHERE ${match}${mappingGate} ON CONFLICT(membership_id) DO UPDATE SET
+      role=excluded.role,enabled=excluded.enabled,version=excluded.version,event_id=excluded.event_id,
+      application_roles_json=COALESCE(excluded.application_roles_json,onepass_grants.application_roles_json)
       WHERE excluded.version>onepass_grants.version AND excluded.org_id=onepass_grants.org_id
-        AND excluded.application_user_id=onepass_grants.application_user_id`)
-      .bind(event.membership_id,orgId,event.application_user_id,event.role,event.enabled?1:0,event.version,event.event_id,event.event_id,digest,...(requiresLocalAccount?[orgId,event.membership_id]:[]));
+        AND excluded.application_user_id=onepass_grants.application_user_id
+        AND (excluded.enabled=0 OR excluded.application_roles_json IS NOT NULL OR onepass_grants.application_roles_json IS NULL)`)
+      .bind(event.membership_id,orgId,event.application_user_id,event.role,event.enabled?1:0,event.version,event.event_id,roles,event.event_id,digest,...(requiresLocalAccount?[orgId,event.membership_id]:[]));
   }else return forbidden();
   await env.DB.batch([receipt,...provisioning,action]);
   const known=await env.DB.prepare('SELECT payload_hash FROM onepass_receipts WHERE event_id=?').bind(event.event_id).first<string>('payload_hash');
@@ -194,9 +232,15 @@ async function eventRequest(request:Request,env:OnePassEnv,cfg:ReturnType<typeof
       latest_entitlement_version:latest.version,result:latest.event_id===event.event_id?'applied':'ignored_stale'});
   }
   if(event.type==='membership.set'){
-    const applied=await env.DB.prepare('SELECT event_id FROM onepass_grants WHERE membership_id=?').bind(event.membership_id).first<string>('event_id');
-    if(applied!==event.event_id) return requiresLocalAccount?linkRequired():forbidden();
-    return Response.json({event_id:event.event_id,org_id:orgId,application_user_id:event.application_user_id,version:event.version,result:'applied',...(requiresLocalAccount?{local_account_ready:true}:{})});
+    const applied=await env.DB.prepare('SELECT event_id, version, application_roles_json FROM onepass_grants WHERE membership_id=?')
+      .bind(event.membership_id).first<{event_id:string; version:number; application_roles_json:string|null}>();
+    if(!applied||applied.event_id!==event.event_id) {
+      return requiresLocalAccount&&(!applied||applied.version<event.version)?linkRequired():forbidden();
+    }
+    return Response.json({event_id:event.event_id,org_id:orgId,application_user_id:event.application_user_id,version:event.version,result:'applied',
+      ...(requiresLocalAccount?{local_account_ready:true}:{}),
+      ...(event.application_roles===undefined?{}:{application_roles:JSON.parse(applied.application_roles_json!)}),
+    });
   }
   return Response.json({event_id:event.event_id,org_id:orgId,result:'applied'});
 }
