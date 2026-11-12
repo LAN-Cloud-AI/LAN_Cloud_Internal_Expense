@@ -379,3 +379,26 @@ describe('identity settings and external binding UI', () => {
     }
   });
 });
+
+it('OnePass people page removes the retired Access login whitelist and keeps business roles', () => {
+  const html = ui.renderAdminUi({
+    page: 'people', onePass: true,
+    principal: { displayName: 'fixture', roles: ['system_admin'] },
+  });
+  const page = html.split('<script>')[0]!;
+  expect(page).toContain('身份验证与应用访问由 OnePass 管理');
+  expect(page).toContain('data-api="user-roles"');
+  expect(page).not.toContain('data-api="login-whitelist"');
+  expect(page).not.toContain('Cloudflare Access');
+});
+
+
+it('OnePass profile describes login and has no legacy identity binding controls', () => {
+  const html = ui.renderAdminUi({page:'profile', onePass:true, principal:{displayName:'fixture',roles:['employee']}});
+  const page = html.split('<script>')[0]!;
+  expect(page).toContain('使用 OnePass 登录');
+  expect(page).toContain('action="/auth/onepass/logout"');
+  expect(page).not.toContain('外部绑定');
+  expect(page).not.toContain('Cloudflare Access');
+  expect(page).not.toContain('GitHub');
+});

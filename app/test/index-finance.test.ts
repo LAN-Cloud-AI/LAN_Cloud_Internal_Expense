@@ -37,7 +37,8 @@ function setup() {
   const database = createDatabase();
   const env: Env = {
     DB: sqliteD1(database),
-    ENVIRONMENT: 'production',
+    ENVIRONMENT: 'test',
+    ONEPASS_LOGIN_MODE: 'access',
     DEV_AUTH: '1',
     ACCESS_AUD_CORPORATE: 'corporate-aud',
   };

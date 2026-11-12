@@ -1,5 +1,4 @@
 import type { Env } from './types';
-import { onePassEnabled } from './onepass';
 
 export type AccessEntryKind = 'corporate' | 'legacy';
 
@@ -17,8 +16,10 @@ function hostnameWithoutPort(host: string): string {
   return host.trim().toLowerCase().replace(/:\d+$/, '');
 }
 
-export function onePassLoginEnabled(env: Env): boolean {
-  return onePassEnabled(env) && env.ONEPASS_LOGIN_MODE !== 'access';
+export function onePassLoginEnabled(_env: Env): boolean {
+  // Cloudflare Access assertions are never a production identity source.
+  // Missing OnePass configuration must fail closed, regardless of mode vars.
+  return true;
 }
 
 export function accessEntryForRequest(host: string, env: Env): AccessEntry | null {
@@ -31,11 +32,11 @@ export function accessEntryForRequest(host: string, env: Env): AccessEntry | nul
       origin: `https://${CORPORATE_HOSTNAME}`,
     };
   }
-  if (hostname === LEGACY_HOSTNAME && env.ACCESS_AUD_CORPORATE) {
+  if (hostname === LEGACY_HOSTNAME && (env.ACCESS_AUD_CORPORATE || onePassLoginEnabled(env))) {
     return {
       kind: 'legacy',
       hostname: LEGACY_HOSTNAME,
-      audience: env.ACCESS_AUD_CORPORATE,
+      audience: env.ACCESS_AUD_CORPORATE ?? '',
       origin: '',
     };
   }

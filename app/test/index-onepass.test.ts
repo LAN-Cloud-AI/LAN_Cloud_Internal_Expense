@@ -242,3 +242,73 @@ it('rejects stale v2 provisioning and rolls back a failed local account transact
   expect(db.prepare('SELECT count(*) AS count FROM users WHERE email=?').get('failure@lancloudtech.com')).toEqual({ count: 0 });
   expect(db.prepare('SELECT count(*) AS count FROM onepass_receipts WHERE event_id=?').get(failed.event_id)).toEqual({ count: 0 });
 });
+
+it('never accepts Cloudflare identity as a production login, even with stale or missing OnePass settings', async () => {
+  const {db, env, identity} = setup();
+  env.ENVIRONMENT = 'production';
+  env.ONEPASS_LOGIN_MODE = 'access';
+  env.ACCESS_AUD_CORPORATE = 'fixture-access-audience';
+  const cloudflareResolver = vi.fn(async () => ({issuer:'https://fixture.cloudflareaccess.com', subject:'fixture-access', email:'fixture@lancloudtech.com'}));
+  const app = createApp({resolveIdentity: cloudflareResolver});
+  const spoofed = {headers:{'Cf-Access-Jwt-Assertion':'forged-token','x-dev-subject':'fixture-access'}};
+  expect((await app.request(expense+'/api/session',spoofed,env)).status).toBe(401);
+  expect((await app.request(expense+'/',spoofed,env)).status).toBe(401);
+  expect(await (await app.request(expense+'/',spoofed,env)).text()).toContain('使用 OnePass 登录');
+  expect(cloudflareResolver).not.toHaveBeenCalled();
+  env.ONEPASS_ENABLED = '0';
+  expect((await app.request(expense+'/api/session',spoofed,env)).status).toBe(401);
+  expect(cloudflareResolver).not.toHaveBeenCalled();
+  env.ONEPASS_ENABLED = '1';
+  identity.access_model = 'unlimited';
+  db.prepare('INSERT INTO onepass_org(org_id) VALUES(?)').run(org);
+  db.prepare('INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id) VALUES(?,?,?,?,1,1,?)')
+    .run(membership,org,applicationUser,'administrator',crypto.randomUUID());
+  db.prepare('INSERT INTO onepass_local_accounts(org_id,membership_id,user_id) VALUES(?,?,?)').run(org,membership,localUser);
+  const validOnePass = {headers:{cookie:'__Host-onepass_session='+identity.session_id, 'Cf-Access-Jwt-Assertion':'forged-token'}};
+  expect((await app.request(expense+'/api/session',validOnePass,env)).status).toBe(200);
+  expect(cloudflareResolver).not.toHaveBeenCalled();
+  expect((await app.request(expense+path,{method:'POST',body:'{}'},env)).status).toBe(403);
+});
+
+it('keeps the legacy host as a safe redirect without requiring Cloudflare settings', async () => {
+  const {env} = setup();
+  env.ENVIRONMENT = 'production';
+  env.ONEPASS_ENABLED = '0';
+  env.ONEPASS_LOGIN_MODE = 'access';
+  env.ACCESS_AUD_CORPORATE = undefined;
+  const app = createApp();
+  const oldHost = 'https://ie_oa.lancloudtech.com';
+  const redirect = await app.request(oldHost+'/profile', {redirect:'manual'}, env);
+  expect(redirect.status).toBe(308);
+  expect(redirect.headers.get('location')).toBe(expense+'/profile');
+  expect((await app.request(oldHost+'/api/session',{method:'POST'},env)).status).toBe(410);
+  expect((await app.request(expense+'/logout',{redirect:'manual'},env)).headers.get('location')).toBe('/profile');
+});
+
+it('does not enable Cloudflare or dev-header login in the deployed app even if marked as test', async () => {
+  const {env} = setup();
+  env.ENVIRONMENT = 'test';
+  env.ONEPASS_LOGIN_MODE = 'access';
+  env.ONEPASS_ENABLED = '0';
+  env.DEV_AUTH = '1';
+  env.ACCESS_AUD_CORPORATE = 'fixture-audience';
+  const app = createApp();
+  expect((await app.request(expense+'/api/session',{headers:{'x-dev-subject':'fixture','x-dev-email':'fixture@lancloudtech.com','Cf-Access-Jwt-Assertion':'forged'}},env)).status).toBe(401);
+});
+
+
+it('retires obsolete Access whitelist endpoints in OnePass mode without altering stored rules', async () => {
+  const {db, env, identity, req} = setup();
+  identity.access_model='unlimited';
+  db.prepare('INSERT INTO onepass_org(org_id) VALUES(?)').run(org);
+  db.prepare('INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id) VALUES(?,?,?,?,1,1,?)')
+    .run(membership,org,applicationUser,'administrator',crypto.randomUUID());
+  db.prepare('INSERT INTO onepass_local_accounts(org_id,membership_id,user_id) VALUES(?,?,?)').run(org,membership,localUser);
+  db.prepare("INSERT INTO user_roles(user_id,role_id) VALUES(?,'role-system-admin')").run(localUser);
+  const headers={cookie:'__Host-onepass_session='+identity.session_id,origin:expense,'content-type':'application/json'};
+  const before=db.prepare('SELECT count(*) AS count FROM login_whitelist').get();
+  expect((await req('/api/login-whitelist',{headers})).status).toBe(410);
+  expect((await req('/api/login-whitelist',{method:'POST',headers,body:JSON.stringify({kind:'domain',value:'sample.test'})})).status).toBe(410);
+  expect((await req('/api/login-whitelist/fixture',{method:'DELETE',headers})).status).toBe(410);
+  expect(db.prepare('SELECT count(*) AS count FROM login_whitelist').get()).toEqual(before);
+});

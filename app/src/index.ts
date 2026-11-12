@@ -7,13 +7,12 @@
 import { Hono, type Context } from 'hono';
 import {
   APP_ROLES,
-  resolveAuthenticatedIdentity,
   validateIdentityForEntry,
   type AppRole,
   type AuthenticatedIdentity,
   type Principal,
 } from './lib/auth';
-import { accessEntryForRequest, isAllowedEntryOrigin, normalizeVerifiedEmail, onePassLoginEnabled, type AccessEntry } from './lib/access-entry';
+import { accessEntryForRequest, isAllowedEntryOrigin, normalizeVerifiedEmail, type AccessEntry } from './lib/access-entry';
 import { IdentityProblem, IdentityStore } from './lib/identity-store';
 import { fetchCnyRate, rateToMinorUnitRational } from './lib/fx';
 import {
@@ -46,6 +45,7 @@ import {
 type AppVariables = {
   entry: AccessEntry | null;
   principal: Principal | null;
+  onePassLogin: boolean;
 };
 
 export type AppBindings = {
@@ -193,7 +193,7 @@ function requireRoles(
   const originFailure = ensureMutationOrigin(c);
   if (originFailure) return originFailure;
   const principal = c.get('principal');
-  if (!principal) return problem(c, 401, 'authentication_required', onePassLoginEnabled(c.env)
+  if (!principal) return problem(c, 401, 'authentication_required', c.get('onePassLogin')
     ? '请使用已关联本系统账号的 OnePass 组织身份登录。' : '需要通过 Cloudflare Access 登录并分配系统角色。');
   if (!hasAnyRole(principal, roles)) {
     return problem(c, 403, 'insufficient_role', '当前角色没有执行该操作的权限。');
@@ -880,7 +880,10 @@ async function scheduledCandidateGeneration(env: Env): Promise<void> {
 
 export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings> {
   const app = new Hono<AppBindings>();
-  const resolveIdentity = dependencies.resolveIdentity ?? resolveAuthenticatedIdentity;
+  // Legacy identity injection exists solely for isolated business-logic tests.
+  // The deployed Worker constructs createApp() with no resolver, so no env
+  // variable can reactivate Cloudflare Access as an authentication method.
+  const resolveIdentity = dependencies.resolveIdentity;
   const now = dependencies.now ?? (() => new Date());
   const fetcher = dependencies.fetcher ?? fetch;
 
@@ -910,6 +913,8 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
     c.set('entry', entry);
 
     c.set('principal', null);
+    const legacyFixture = c.env.ENVIRONMENT === 'test' && c.env.ONEPASS_LOGIN_MODE === 'access' && !!resolveIdentity;
+    c.set('onePassLogin', !legacyFixture);
 
     if (entry.kind === 'legacy') {
       if (c.req.method === 'GET' || c.req.method === 'HEAD') {
@@ -920,7 +925,7 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
 
     if (c.req.path === '/api/health') return next();
 
-    const onePassLogin = onePassLoginEnabled(c.env);
+    const onePassLogin = !legacyFixture;
     if (onePassEnabled(c.env) && (onePassLogin || c.req.path === '/api/internal/onepass/events')) {
       const response = await handleOnePass(c.req.raw, c.env);
       if (response) return response;
@@ -939,7 +944,7 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
     }
 
     try {
-      const identity = await resolveIdentity(c.req.raw, c.env, entry);
+      const identity = await resolveIdentity!(c.req.raw, c.env, entry);
       if (!identity) return next();
       validateIdentityForEntry(identity, entry);
 
@@ -966,7 +971,7 @@ export function createApp(dependencies: AppDependencies = {}): Hono<AppBindings>
 // 应用级 /cdn-cgi/access/logout 只清本应用会话；全局（团队域）会话仍在，
 // 其他入口会被 SSO 静默续期。真正的“登出所有入口”必须跳团队域登出。
 app.get('/logout', (c) => {
-  if (onePassLoginEnabled(c.env)) return c.redirect('/profile', 303);
+  if (c.get('onePassLogin')) return c.redirect('/profile', 303);
   const issuer = c.env.ACCESS_ISSUER?.replace(/\/+$/, '');
   if (issuer) return c.redirect(`${issuer}/cdn-cgi/access/logout`, 302);
   return c.redirect('/cdn-cgi/access/logout', 302);
@@ -1190,6 +1195,7 @@ app.put('/api/users/:userId', async (c) => {
 app.get('/api/login-whitelist', async (c) => {
   const auth = requireRoles(c, ['system_admin']);
   if (isResponse(auth)) return auth;
+  if (c.get('onePassLogin')) return problem(c, 410, 'access_login_retired', '登录权限已由 OnePass 管理。');
   const rows = await c.env.DB.prepare(
     `SELECT whitelist.id, whitelist.kind, whitelist.value, whitelist.created_at,
             creator.display_name AS created_by_name
@@ -1203,6 +1209,7 @@ app.get('/api/login-whitelist', async (c) => {
 app.post('/api/login-whitelist', async (c) => {
   const auth = requireRoles(c, ['system_admin']);
   if (isResponse(auth)) return auth;
+  if (c.get('onePassLogin')) return problem(c, 410, 'access_login_retired', '登录权限已由 OnePass 管理。');
   const body = await jsonBody(c);
   const kind = enumValue(body, 'kind', ['email', 'domain'] as const);
   const rawValue = requiredString(body, 'value', 255);
@@ -1233,6 +1240,7 @@ app.post('/api/login-whitelist', async (c) => {
 app.delete('/api/login-whitelist/:ruleId', async (c) => {
   const auth = requireRoles(c, ['system_admin']);
   if (isResponse(auth)) return auth;
+  if (c.get('onePassLogin')) return problem(c, 410, 'access_login_retired', '登录权限已由 OnePass 管理。');
   const ruleId = c.req.param('ruleId');
   const existing = await c.env.DB.prepare(
     `SELECT id FROM login_whitelist WHERE id = ?`,
@@ -2354,7 +2362,7 @@ function renderUiRoute(
   options: { status?: 200 | 404; trustedBody?: string } = {},
 ): Response {
   const principal = c.get('principal');
-  const onePass = onePassLoginEnabled(c.env);
+  const onePass = c.get('onePassLogin');
   if (!principal) return c.html(renderCorporateAccessRequiredUi(onePass), 401);
   return c.html(renderAdminUi({
     page,
