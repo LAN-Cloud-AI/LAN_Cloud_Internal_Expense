@@ -1,4 +1,4 @@
-// OnePass Worker adapter v1. Keep this file in sync with the OnePass source.
+// OnePass Worker adapter: signed identity and optional verified-email provisioning.
 export interface OnePassEnv {
   DB: D1Database;
   ONEPASS_ENABLED?: string;
@@ -33,6 +33,7 @@ const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).rep
 const random = () => base64url(crypto.getRandomValues(new Uint8Array(32)));
 const hash = (value: string) => crypto.subtle.digest('SHA-256',encoder.encode(value));
 const forbidden = () => new Response('OnePass 授权无效',{status:403,headers:{'cache-control':'no-store'}});
+const linkRequired = () => Response.json({error:{code:'ACCOUNT_LINK_REQUIRED'}},{status:409,headers:{'cache-control':'no-store'}});
 const unavailable = () => new Response('OnePass 暂不可用',{status:503,headers:{'cache-control':'no-store'}});
 export const onePassEnabled = (env:OnePassEnv) => env.ONEPASS_ENABLED==='1';
 
@@ -121,7 +122,8 @@ async function eventRequest(request:Request,env:OnePassEnv,cfg:ReturnType<typeof
     if(event.source?.issuer!=='onepass-subscriptions'||event.source?.environment!==env.ONEPASS_ENVIRONMENT||
       event.audience?.environment!==env.ONEPASS_ENVIRONMENT||event.audience?.instance_id!==env.ONEPASS_INSTANCE_ID||
       ![2,3].includes(event.protocol_version)) return forbidden();
-  }else if(event.environment!==env.ONEPASS_ENVIRONMENT||event.instance_id!==env.ONEPASS_INSTANCE_ID||event.protocol_version!==1) return forbidden();
+  }else if(event.environment!==env.ONEPASS_ENVIRONMENT||event.instance_id!==env.ONEPASS_INSTANCE_ID||![1,2].includes(event.protocol_version)||
+    (event.protocol_version===2&&event.type!=='membership.set')) return forbidden();
   if(!entitlement&&event.type==='probe') return Response.json({event_id:event.event_id,result:'applied'});
   const orgId=entitlement?event.subject?.org_id:event.org_id;
   if(orgId!==env.ONEPASS_ORG_ID) return forbidden();
@@ -129,6 +131,8 @@ async function eventRequest(request:Request,env:OnePassEnv,cfg:ReturnType<typeof
     .bind(event.event_id,digest);
   const match='EXISTS (SELECT 1 FROM onepass_receipts WHERE event_id=? AND payload_hash=?)';
   let action:D1PreparedStatement;
+  const provisioning:D1PreparedStatement[]=[];
+  let requiresLocalAccount=false;
   if(entitlement){
     if(!Number.isSafeInteger(event.entitlement_version)||event.entitlement_version<1||typeof event.status!=='string'||
       typeof event.period_end!=='string'||!Number.isFinite(Date.parse(event.period_end))) return forbidden();
@@ -143,14 +147,45 @@ async function eventRequest(request:Request,env:OnePassEnv,cfg:ReturnType<typeof
   }else if(event.type==='membership.set'){
     if(!uuid(event.membership_id)||!uuid(event.application_user_id)||!['administrator','member'].includes(event.role)||
       typeof event.enabled!=='boolean'||!Number.isSafeInteger(event.version)||event.version<1) return forbidden();
+    if(event.protocol_version===2 && event.enabled){
+      const data=event.provisioning;
+      const email=typeof data?.verified_email==='string'?data.verified_email.toLowerCase():'';
+      if(data?.mode!=='new'||email.length>254||!/^[^@\s\x00-\x1f]+@lancloudtech\.com$/.test(email)||
+        typeof data.name!=='string'||!data.name.trim()||data.name.length>80||/[\x00-\x1f\x7f]/.test(data.name)) return forbidden();
+      requiresLocalAccount=true;
+      // A stale or conflicting event must never create a local account.
+      const previous=await env.DB.prepare('SELECT org_id,application_user_id,version,event_id FROM onepass_grants WHERE membership_id=?')
+        .bind(event.membership_id).first<{org_id:string;application_user_id:string;version:number;event_id:string}>();
+      if(previous&&(previous.org_id!==orgId||previous.application_user_id!==event.application_user_id||
+        (previous.version>=event.version&&previous.event_id!==event.event_id))) return forbidden();
+      const mapped=await env.DB.prepare('SELECT user_id FROM onepass_local_accounts WHERE org_id=? AND membership_id=?')
+        .bind(orgId,event.membership_id).first();
+      if(!mapped){
+        if(event.role!=='member') return forbidden();
+        if(await env.DB.prepare('SELECT 1 AS found FROM users WHERE lower(email)=?').bind(email).first()) return linkRequired();
+        const userId=crypto.randomUUID();
+        provisioning.push(env.DB.prepare(`INSERT INTO users(id,email,display_name,employment_status)
+          SELECT ?,?,?,'active' WHERE ${match} AND NOT EXISTS (SELECT 1 FROM onepass_grants WHERE membership_id=? AND (org_id<>? OR application_user_id<>? OR version>=?))`).bind(userId,email,data.name,event.event_id,digest,event.membership_id,orgId,event.application_user_id,event.version));
+        provisioning.push(env.DB.prepare(`INSERT INTO user_roles(user_id,role_id)
+          SELECT ?,'role-employee' WHERE EXISTS(SELECT 1 FROM users WHERE id=?)`)
+          .bind(userId,userId));
+        provisioning.push(env.DB.prepare(`INSERT INTO onepass_local_accounts(org_id,membership_id,user_id)
+          SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM user_roles WHERE user_id=? AND role_id='role-employee')`)
+          .bind(orgId,event.membership_id,userId,userId));
+        provisioning.push(env.DB.prepare(`INSERT INTO audit_events(id,actor_id,action,entity_type,entity_id,detail_json)
+          SELECT ?,NULL,'onepass_create_user','user',?,'{}' WHERE EXISTS(SELECT 1 FROM onepass_local_accounts WHERE org_id=? AND membership_id=? AND user_id=?)`)
+          .bind(event.event_id,userId,orgId,event.membership_id,userId));
+      }
+    }
+    const mappingGate=requiresLocalAccount?' AND EXISTS(SELECT 1 FROM onepass_local_accounts WHERE org_id=? AND membership_id=?)':'';
     action=env.DB.prepare(`INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id)
-      SELECT ?,?,?,?,?,?,? WHERE ${match} ON CONFLICT(membership_id) DO UPDATE SET
+      SELECT ?,?,?,?,?,?,? WHERE ${match}${mappingGate} ON CONFLICT(membership_id) DO UPDATE SET
       role=excluded.role,enabled=excluded.enabled,version=excluded.version,event_id=excluded.event_id
       WHERE excluded.version>onepass_grants.version AND excluded.org_id=onepass_grants.org_id
         AND excluded.application_user_id=onepass_grants.application_user_id`)
-      .bind(event.membership_id,orgId,event.application_user_id,event.role,event.enabled?1:0,event.version,event.event_id,event.event_id,digest);
+      .bind(event.membership_id,orgId,event.application_user_id,event.role,event.enabled?1:0,event.version,event.event_id,event.event_id,digest,...(requiresLocalAccount?[orgId,event.membership_id]:[]));
   }else return forbidden();
-  await env.DB.batch([receipt,action]);
+  await env.DB.batch([receipt,...provisioning,action]);
   const known=await env.DB.prepare('SELECT payload_hash FROM onepass_receipts WHERE event_id=?').bind(event.event_id).first<string>('payload_hash');
   if(known!==digest) return forbidden();
   if(entitlement){
@@ -161,8 +196,8 @@ async function eventRequest(request:Request,env:OnePassEnv,cfg:ReturnType<typeof
   }
   if(event.type==='membership.set'){
     const applied=await env.DB.prepare('SELECT event_id FROM onepass_grants WHERE membership_id=?').bind(event.membership_id).first<string>('event_id');
-    if(applied!==event.event_id) return forbidden();
-    return Response.json({event_id:event.event_id,org_id:orgId,application_user_id:event.application_user_id,version:event.version,result:'applied'});
+    if(applied!==event.event_id) return requiresLocalAccount?linkRequired():forbidden();
+    return Response.json({event_id:event.event_id,org_id:orgId,application_user_id:event.application_user_id,version:event.version,result:'applied',...(requiresLocalAccount?{local_account_ready:true}:{})});
   }
   return Response.json({event_id:event.event_id,org_id:orgId,result:'applied'});
 }
