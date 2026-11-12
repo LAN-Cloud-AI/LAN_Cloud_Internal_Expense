@@ -214,8 +214,11 @@ it('provisions only new verified members and never claims an existing Expense ac
   expect(await response.json()).toEqual({ error: { code: 'ACCOUNT_LINK_REQUIRED' } });
   expect(db.prepare('SELECT count(*) AS count FROM onepass_local_accounts WHERE membership_id=?').get(conflict.membership_id)).toEqual({ count: 0 });
   expect(db.prepare('SELECT count(*) AS count FROM onepass_grants WHERE membership_id=?').get(conflict.membership_id)).toEqual({ count: 0 });
-  expect((await req(path, await signedEvent(env, { ...conflict, event_id: crypto.randomUUID(), role: 'administrator',
-    provisioning: { mode: 'new', verified_email: 'admin@lancloudtech.com', name: 'Admin' } }))).status).toBe(403);
+  const initialAdmin = { ...conflict, event_id: crypto.randomUUID(), role: 'administrator',
+    provisioning: { mode: 'new', verified_email: 'admin@lancloudtech.com', name: 'Admin' } };
+  expect((await req(path, await signedEvent(env, initialAdmin))).status).toBe(200);
+  const adminMapping = db.prepare('SELECT user_id FROM onepass_local_accounts WHERE org_id=? AND membership_id=?').get(org,initialAdmin.membership_id) as { user_id: string };
+  expect(db.prepare('SELECT role_id FROM user_roles WHERE user_id=?').all(adminMapping.user_id)).toEqual([{ role_id: 'role-employee' }]);
   expect((await req(path, await signedEvent(env, { ...grant, event_id: crypto.randomUUID(), version: 2, enabled: false, provisioning: undefined }))).status).toBe(200);
   expect(db.prepare('SELECT enabled FROM onepass_grants WHERE membership_id=?').get(member)).toEqual({ enabled: 0 });
   expect(db.prepare('SELECT employment_status FROM users WHERE id=?').get(mapping.user_id)).toEqual({ employment_status: 'active' });

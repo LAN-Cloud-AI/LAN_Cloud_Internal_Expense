@@ -161,7 +161,6 @@ async function eventRequest(request:Request,env:OnePassEnv,cfg:ReturnType<typeof
       const mapped=await env.DB.prepare('SELECT user_id FROM onepass_local_accounts WHERE org_id=? AND membership_id=?')
         .bind(orgId,event.membership_id).first();
       if(!mapped){
-        if(event.role!=='member') return forbidden();
         if(await env.DB.prepare('SELECT 1 AS found FROM users WHERE lower(email)=?').bind(email).first()) return linkRequired();
         const userId=crypto.randomUUID();
         provisioning.push(env.DB.prepare(`INSERT INTO users(id,email,display_name,employment_status)
