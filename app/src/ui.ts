@@ -95,7 +95,7 @@ const NAV_ITEMS: NavItem[] = [
   { page: 'finance', href: '/finance', icon: '∑', label: '财务总览', description: '财年支出与图表' },
   { page: 'rates', href: '/rates', icon: '↗', label: '汇率', description: '快照与同步状态' },
   { page: 'people', href: '/people', icon: '◎', label: '人员与权限', description: '用户、角色与付款者' },
-  { page: 'profile', href: '/profile', icon: '◌', label: '个人设置', description: '登录身份与外部绑定' },
+  { page: 'profile', href: '/profile', icon: '◌', label: '个人设置', description: '登录身份与会话' },
 ];
 
 const PAGE_META: Record<UiPage, { title: string; eyebrow: string; description: string }> = {
@@ -137,7 +137,7 @@ const PAGE_META: Record<UiPage, { title: string; eyebrow: string; description: s
   profile: {
     title: '个人设置',
     eyebrow: 'IDENTITY SETTINGS',
-    description: '查看企业登录身份与设备会话。',
+    description: '查看登录身份与会话。',
   },
 };
 
@@ -472,9 +472,9 @@ function ratesPage(): string {
   </section>`;
 }
 
-function peoplePage(): string {
+function peoplePage(onePass: boolean): string {
   return `<section class="surface">
-    ${sectionHeading('权限边界', '角色决定可见范围和可执行动作；身份验证由 Cloudflare Access 完成，业务角色由 D1 维护。')}
+    ${sectionHeading('权限边界', onePass ? '身份验证与应用访问由 OnePass 管理，业务角色由本系统维护。' : '角色决定可见范围和可执行动作；身份验证由 Cloudflare Access 完成，业务角色由 D1 维护。')}
     <div class="role-grid">
       <article><strong>系统管理员</strong><span>系统配置、用户与权限</span></article>
       <article><strong>资产管理员</strong><span>账号资产、订阅与来源映射</span></article>
@@ -484,8 +484,8 @@ function peoplePage(): string {
       <article><strong>审计员</strong><span>只读审计、导入与汇率记录</span></article>
     </div>
   </section>
-  <section class="split-grid account-grid">
-    <article class="surface form-surface">
+  <section class="${onePass ? '' : 'split-grid account-grid'}">
+    ${onePass ? '' : `<article class="surface form-surface">
       ${sectionHeading('登录白名单', '通过 Cloudflare Access 登录且命中白名单的用户自动开通 employee 账号，无需审核。新邮箱/域名还需在 Access 企业应用 policy 中放行才能到达系统。')}
       <form data-api="login-whitelist" data-success="白名单规则已添加。">
         <div class="two-columns">
@@ -495,7 +495,7 @@ function peoplePage(): string {
         <div class="form-actions"><button class="button primary" type="submit">添加规则</button></div>
       </form>
       ${emptyCollection('login-whitelist', '白名单规则')}
-    </article>
+    </article>`}
     <article class="surface form-surface">
       ${sectionHeading('分配角色', '角色替换是明确操作；提交后以 D1 审计记录为准。')}
       <form data-api="user-roles" data-success="用户角色已更新。">
@@ -521,7 +521,7 @@ function peoplePage(): string {
     <div class="action-result" id="user-edit-result" aria-live="polite"></div>
   </section>
   <section class="surface">
-    ${sectionHeading('系统用户', '外部身份使用稳定 subject 绑定，邮箱不能作为唯一安全凭据。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
+    ${sectionHeading('系统用户', onePass ? 'OnePass 成员与系统账号按稳定身份绑定，邮箱不能作为唯一安全凭据。' : '外部身份使用稳定 subject 绑定，邮箱不能作为唯一安全凭据。', '<button class="button secondary" type="button" data-action="refresh">刷新</button>')}
     ${emptyCollection('people', '系统用户')}
   </section>`;
 }
@@ -564,7 +564,7 @@ function pageContent(page: UiPage, employeeOnly: boolean, canManageAccounts: boo
     case 'rates':
       return ratesPage();
     case 'people':
-      return peoplePage();
+      return peoplePage(onePass);
     case 'profile':
       return profilePage(onePass);
     default:
@@ -660,7 +660,7 @@ export function renderCorporateAccessRequiredUi(onePass = false, unmapped = fals
 
 function styles(): string {
   return `
-    :root { --ink:#172032; --muted:#697386; --line:#e7ebf1; --surface:#fff; --canvas:#f5f7fb; --brand:#3559e0; --brand-dark:#263fa5; --accent:#e8efff; --warn:#a86200; --warn-bg:#fff4df; --danger:#bf3a3a; --good:#1d7a55; --shadow:0 12px 30px rgba(30,47,80,.08); font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+    :root { --ink:#172032; --muted:#697386; --line:#e7ebf1; --surface:#fff; --canvas:#f5f7fb; --brand:#3559e0; --brand-dark:#263fa5; --accent:#e8efff; --warn:#a86200; --warn-bg:#fff4df; --danger:#bf3a3a; --good:#1d7a55; --shadow:0 12px 30px rgba(30,47,80,.08); font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",-apple-system,BlinkMacSystemFont,sans-serif; }
     * { box-sizing:border-box; } body { margin:0; color:var(--ink); background:var(--canvas); font-size:14px; line-height:1.5; }
     [hidden] { display:none !important; }
     .app-shell { min-height:100vh; display:grid; grid-template-columns:250px minmax(0,1fr); align-items:start; }

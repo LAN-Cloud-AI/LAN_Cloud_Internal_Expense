@@ -18,7 +18,7 @@
     }
   ],
   "vars": {
-    // production 下只接受经 Cloudflare Access 验签的登录身份。
+    // 所有环境的实际 Worker 仅接受 OnePass 登录；配置缺失时失败关闭。
     "ENVIRONMENT": "production",
     "APP_ORIGINS": "https://ie-oa.lancloudtech.com,https://external-ie-oa.lancloudtech.com",
     // ECB 数据源：Worker 每天 01:00 UTC 记录配置货币兑 CNY 的汇率。

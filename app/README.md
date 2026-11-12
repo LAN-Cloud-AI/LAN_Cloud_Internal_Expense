@@ -1,8 +1,8 @@
 # 兰芯云朵行政——订阅资产管理系统
 
-一个独立部署的轻量化订阅资产与报销系统：Cloudflare Workers 提供页面和 API，D1 保存独立账本，R2 保存凭证对象，Cron 驱动定时汇率同步，Cloudflare Access 负责入口认证。它不需要自建服务器，D1 是唯一的业务账本。
+一个独立部署的轻量化订阅资产与报销系统：Cloudflare Workers 提供页面和 API，D1 保存独立账本，R2 保存凭证对象，Cron 驱动定时汇率同步，OnePass 负责身份认证和应用访问授权。它不需要自建服务器，D1 是唯一的业务账本。
 
-系统由单一企业入口 [https://ie-oa.lancloudtech.com](https://ie-oa.lancloudtech.com) 提供服务，仅允许企业邮箱 OTP（一次性验证码）登录；旧入口 `https://ie_oa.lancloudtech.com` 仅作临时安全迁移。当前仓库是待上线配置与实现，不以本文宣称已完成生产部署；凭据仅存在于 Cloudflare Workers Secrets，绝不写入仓库。
+系统由单一企业入口 [https://ie-oa.lancloudtech.com](https://ie-oa.lancloudtech.com) 提供服务，仅支持 OnePass 登录；旧入口 `https://ie_oa.lancloudtech.com` 仅作临时安全迁移。当前仓库是待上线配置与实现，不以本文宣称已完成生产部署；凭据仅存在于 Cloudflare Workers Secrets，绝不写入仓库。
 
 ## 业务边界
 
@@ -14,7 +14,7 @@
 4. 批量勾选候选费用后，一次提交自动按**付款者**拆成一个或多个报销批次。
 5. 从已付款明细的连续覆盖区间推导上次已报销日期；中间有缺口时，不能用未来已付款项目越过缺口。
 6. 记录汇率来源、抓取时间、快照状态和审批/付款等审计轨迹。
-7. 使用 Cloudflare Access + D1 角色授权，而不是让前端页面自行决定权限。
+7. 使用 OnePass 认证与应用授权，加上 D1 业务角色校验，而不是让前端页面自行决定权限。
 
 不在本系统保存密码、OTP、MFA 恢复码、外部用户 Token、完整银行卡号或报销平台登录凭据。
 
@@ -22,7 +22,7 @@
 
 ```text
 浏览器
-  -> Cloudflare Access（认证）
+  -> OnePass（登录、组织身份与应用授权）
   -> Worker + Hono（服务端页面、API、权限检查）
        -> D1（独立业务账本、审计）
        -> R2（发票/凭证对象，D1 只保存对象键）
@@ -63,35 +63,23 @@
 | `employee` | 查看自己被授权的账号/订阅范围 |
 | `auditor` | 只读查看审计、汇率和报销记录 |
 
-生产环境不接受浏览器自报身份：Worker 按 Host 校验 Cloudflare Access JWT 的签名、对应 `aud`、`iss` 与过期时间，再用稳定 `(issuer, sub)` 查询 D1 中的用户和角色。企业邮箱首次通过企业入口验证后自动创建 active 用户并授予 `employee`；开发环境的 `DEV_AUTH=1` 仅可用于本地测试，绝不能部署到生产。
-
-系统不持有自建会话，登出由 Cloudflare Access 在边缘完成：页面的「登出」指向 Worker 的 `/logout`，由它 302 到团队域 `/cdn-cgi/access/logout` 撤销全局会话——单应用级登出路径只清本应用会话，其他入口会被 SSO 静默续期，因此不在 UI 暴露。
+生产环境只接受 OnePass 的有效组织身份和应用授权。Worker 在每次受保护请求中实时检查 OnePass 会话、组织范围及本地授权，并根据稳定的成员映射读取 D1 业务角色；已停用的映射或本地账号不可访问。Cloudflare Access 断言和开发身份请求头不能登录本系统。组织如启用了邮箱策略，成员须先在 OnePass 验证符合要求的邮箱。
 
 ### OnePass 接入
 
-在接入环境中配置 `ONEPASS_ENABLED=1` 可启用 OnePass 事件接收。`ONEPASS_LOGIN_MODE=access` 保留现有 Cloudflare Access 登录，供上线前接收签名探测和权限事件。将 `ONEPASS_LOGIN_MODE` 切换为 `onepass` 后，业务请求使用 OnePass 会话。未配置该选项时，`ONEPASS_ENABLED=1` 也会选择 OnePass 登录。
+生产 Worker 必须配置 `ONEPASS_ENABLED=1`、`ONEPASS_ORIGIN`、`ONEPASS_CLIENT_ID`、`ONEPASS_REDIRECT_URI`、`ONEPASS_PRODUCT_CODE`、`ONEPASS_ENVIRONMENT`、`ONEPASS_INSTANCE_ID`、`ONEPASS_ORG_ID` 和 `ONEPASS_DELIVERY_KEY_ID`，并通过 Worker Secrets 配置 `ONEPASS_CLIENT_SECRET` 与 `ONEPASS_DELIVERY_SECRET`。未正确配置时认证失败关闭；`ONEPASS_LOGIN_MODE` 不能启用 Cloudflare Access 登录。
 
-Worker 配置包括 `ONEPASS_ORIGIN`、`ONEPASS_CLIENT_ID`、`ONEPASS_REDIRECT_URI`、`ONEPASS_PRODUCT_CODE`、`ONEPASS_ENVIRONMENT`、`ONEPASS_INSTANCE_ID`、`ONEPASS_ORG_ID` 和 `ONEPASS_DELIVERY_KEY_ID`。`ONEPASS_CLIENT_SECRET` 与 `ONEPASS_DELIVERY_SECRET` 通过 Worker Secrets 配置。
+已有成员使用经核实的组织成员 ID 与系统用户 ID 建立稳定映射，不按邮箱自动认领既有账号。新成员按 OnePass 的已验证邮箱同步合同创建普通本地账号；同邮箱冲突需人工核对。应用授权与业务角色分别管理，已有 D1 业务角色保留。登出使用同源 POST 撤销 OnePass 应用会话。
 
-在启用前，由管理员把已核实的 OnePass 组织 ID、成员 ID 和本系统现有用户 ID 写入 `onepass_local_accounts`。映射要求一人一条。OnePass 签发会话、成员授权和有效订阅是登录前提，实际资产、报销、财务和系统管理权限读取 D1 现有的 `user_roles`。禁用本地映射或停用本地账号会阻止随后访问。启用 OnePass 登录后，登出使用同源 POST 并撤销 OnePass 应用会话。
-
-1. 备份生产 D1 并在隔离数据库验证恢复，再应用 `0018_onepass_integration.sql` 和 `0019_onepass_local_accounts.sql`。在 OnePass 登记 Web 客户端、精确回调 `https://ie-oa.lancloudtech.com/auth/onepass/callback` 与签名事件接收端 `https://ie-oa.lancloudtech.com/api/internal/onepass/events`。只为已确认的组织开通 Basic 和成员访问。
-2. 以 `ONEPASS_ENABLED=1`、`ONEPASS_LOGIN_MODE=access` 部署 Worker，保留企业入口的 Access 策略。只让签名事件路径绕过 Access，确认无签名请求被拒绝、OnePass 签名探测成功，企业登录和资产 API 仍按现有规则工作。 [Cloudflare 路径策略](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)
-3. 在本地账号映射、应用权限和订阅同步核验后，先把 Worker 改为 `ONEPASS_LOGIN_MODE=onepass`，再取消企业入口的 Access 登录要求，让浏览器可到达 OnePass 登录和回调。保留旧 `ie_oa` 入口的 Access 保护。核对匿名业务 API、未映射账号、已有角色账号和登出行为。
-4. 回退时先恢复企业入口的 Access 保护，再切回 `ONEPASS_LOGIN_MODE=access`。同时关闭签名事件路径的例外后，可取消 `ONEPASS_ENABLED`。保留 D1 账本及追加迁移。
+部署前先备份 D1 并隔离恢复，核对账号映射、授权状态和 Worker 绑定。发布后验证匿名拒绝、签名接收端、已授权及未授权身份、邮箱策略和业务角色。旧 `ie_oa` 域仅将 GET/HEAD 重定向至正式域；写请求返回 410。发生故障时先恢复入口保护并使用已验证的兼容 Worker 版本，不得通过配置恢复 Cloudflare 登录，也不得以旧快照覆盖新增业务数据。
 
 ## 轻量化部署配置（Cloudflare）
 
-本系统采用同一 Worker/D1/R2 的单入口架构，部署、验收和回滚顺序见 [Cloudflare Access 上线手册](../docs/runbooks/cloudflare-access-dual-entry.md)。执行前不得假设资源已存在或生产已上线。
+本系统使用一个 Worker、D1、R2 和 Cron。部署与恢复应以已核验的 OnePass 接入配置、精确 Worker 版本及备份为准。原 [Cloudflare Access 双入口手册](../docs/runbooks/cloudflare-access-dual-entry.md) 仅供历史记录，不再作为登录或部署依据。
 
-### Access 与身份模型
-
-- 企业入口仅允许 `@lancloudtech.com` 邮箱通过 Access OTP（一次性验证码）登录；首次验证后 Worker 自动开通 active 用户并授予默认 `employee`。
-- 登录白名单（`login_whitelist`）是第二道门：管理员可按精确邮箱或域名放行；未命中白名单的已验证身份会被 403 拒绝。
-- 系统永远用已验签的 `(issuer, subject)` 作为身份键，不按相同邮箱自动合并账户。
-- `employee` 只看到本人使用或本人付款的订阅和账号资产；全局财务、人员、附件、汇率与审计数据仍需要显式业务角色。
-- 会话由 Access 边缘管理：企业应用的 session duration 建议配置为 720 小时（30 天），每台设备验证一次即可使用一个月；登出走团队域全局登出。
-- `ACCESS_AUD_CORPORATE`、`ACCESS_ISSUER`、`ACCESS_JWKS_URL` 和一次性 `MIGRATION_SYSTEM_ADMIN_EMAIL` 均为 Workers Secrets，不属于 `wrangler.jsonc` 的 vars。确认指定企业管理员已有 `system_admin` 后立即删除迁移 secret；遗留 `BOOTSTRAP_ADMIN_*` secret 也在此时清理。
+- OnePass 负责登录、组织和应用访问授权；D1 角色负责订阅资产、报销及财务业务权限。
+- 已有账号按稳定 ID 明确绑定，不凭相同邮箱自动合并；`employee` 默认只查看本人范围。
+- 敏感配置只放在 Worker Secrets，不写入仓库或日志。
 
 ## 页面与 API 约定
 
@@ -119,7 +107,7 @@ Worker 配置包括 `ONEPASS_ORIGIN`、`ONEPASS_CLIENT_ID`、`ONEPASS_REDIRECT_U
 - D1 适合本系统的结构化业务账本；附件走 R2，不能把二进制发票塞入 D1 行数据。
 - Cron 是定时触发，不是实时行情系统；汇率服务不可用时必须保留失败记录并等待人工复核。
 - R2 仅保存经权限校验的凭证对象。下载和上传 API 要验证实体归属和角色，不能把对象键作为公开 URL。
-- Cloudflare Access 保护入口，D1 角色再做业务授权；二者缺一不可。
+- OnePass 验证组织身份与应用访问，D1 角色再做业务授权；两者均不可绕过。
 
 ## 本地开发
 

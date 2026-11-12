@@ -37,7 +37,8 @@ function setup() {
   const database = createDatabase();
   const env: Env = {
     DB: sqliteD1(database),
-    ENVIRONMENT: 'production',
+    ENVIRONMENT: 'test',
+    ONEPASS_LOGIN_MODE: 'access',
     DEV_AUTH: '1',
     ACCESS_AUD_CORPORATE: 'corporate-aud',
   };
@@ -435,11 +436,12 @@ describe('user editing', () => {
     expect(missing.headers.get('cache-control')).toBe('no-store');
   });
 
-  it('redirects /logout to the team-domain global logout so all entries sign out', async () => {
+  it('supports the legacy Access logout only in the isolated legacy test configuration', async () => {
     const database = createDatabase();
     const env: Env = {
       DB: sqliteD1(database),
-      ENVIRONMENT: 'production',
+      ENVIRONMENT: 'test',
+      ONEPASS_LOGIN_MODE: 'access',
       ACCESS_AUD_CORPORATE: 'corporate-aud',
       ACCESS_ISSUER: 'https://long-sky-131d.cloudflareaccess.com',
     };
