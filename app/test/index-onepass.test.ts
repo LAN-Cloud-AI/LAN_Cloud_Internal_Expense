@@ -166,3 +166,24 @@ it('validates signed organization, entitlement and member events before linking 
   expect((await req('/auth/onepass/logout', { method: 'POST', headers: { cookie, origin: expense } })).status).toBe(303);
   expect((await req('/api/session', { headers: { cookie } })).status).toBe(401);
 });
+
+it('uses live OnePass unlimited mode without a billing entitlement while retaining organization and member checks', async () => {
+  const { db, identity, req } = setup();
+  db.prepare('INSERT INTO onepass_org(org_id) VALUES(?)').run(org);
+  db.prepare('INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id) VALUES(?,?,?,?,1,1,?)')
+    .run(membership, org, applicationUser, 'administrator', crypto.randomUUID());
+  db.prepare('INSERT INTO onepass_local_accounts(org_id,membership_id,user_id) VALUES(?,?,?)').run(org, membership, localUser);
+  const headers = { cookie: '__Host-onepass_session=' + identity.session_id };
+  expect((await req('/api/session', { headers })).status).toBe(401); // legacy response requires entitlement
+  identity.access_model = 'unlimited';
+  expect((await req('/api/session', { headers })).status).toBe(200);
+  expect((await req('/api/finance/overview', { headers })).status).toBe(403); // local business roles remain independent
+  db.prepare('UPDATE onepass_grants SET enabled=0 WHERE membership_id=?').run(membership);
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  db.prepare('UPDATE onepass_grants SET enabled=1 WHERE membership_id=?').run(membership);
+  identity.membership.org_id = 'other_org';
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  identity.membership.org_id = org;
+  (identity as unknown as { access_model: string }).access_model = 'invalid';
+  expect((await req('/api/session', { headers })).status).toBe(401);
+});

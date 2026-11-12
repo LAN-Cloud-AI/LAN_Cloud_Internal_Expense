@@ -16,6 +16,7 @@ export interface OnePassEnv {
 
 export interface OnePassIdentity {
   active: true;
+  access_model?: 'subscription' | 'unlimited';
   session_id: string;
   expires_at: string;
   application_user_id: string;
@@ -72,14 +73,20 @@ async function sessionCall(cfg:ReturnType<typeof config>,op:string,body:object) 
 function isIdentity(value:unknown,env:OnePassEnv):value is OnePassIdentity {
   if(!value||typeof value!=='object') return false;
   const i=value as Partial<OnePassIdentity>;
-  return i.active===true&&uuid(i.session_id)&&uuid(i.application_user_id)&&uuid(i.user?.id)&&
+  return i.active===true&&(i.access_model===undefined||i.access_model==='subscription'||i.access_model==='unlimited')&&uuid(i.session_id)&&uuid(i.application_user_id)&&uuid(i.user?.id)&&
     typeof i.user?.name==='string'&&uuid(i.membership?.id)&&i.membership?.org_id===env.ONEPASS_ORG_ID&&
     ['administrator','member'].includes(i.membership?.role??'')&&typeof i.expires_at==='string'&&Date.parse(i.expires_at)>Date.now();
 }
 async function locallyActive(identity:OnePassIdentity,env:OnePassEnv) {
-  const grant=await env.DB.prepare(`SELECT 1 AS active FROM onepass_grants g JOIN onepass_entitlement e ON e.org_id=g.org_id
-    WHERE g.membership_id=? AND g.org_id=? AND g.application_user_id=? AND g.role=? AND g.enabled=1
-      AND e.status='active' AND julianday(e.period_end)>julianday('now')`)
+  // This value comes only from the authenticated OnePass session response.
+  // Missing is the legacy subscription model; unknown values fail validation.
+  const grantQuery=identity.access_model==='unlimited'
+    ? `SELECT 1 AS active FROM onepass_grants g JOIN onepass_org o ON o.org_id=g.org_id
+       WHERE g.membership_id=? AND g.org_id=? AND g.application_user_id=? AND g.role=? AND g.enabled=1`
+    : `SELECT 1 AS active FROM onepass_grants g JOIN onepass_entitlement e ON e.org_id=g.org_id
+       WHERE g.membership_id=? AND g.org_id=? AND g.application_user_id=? AND g.role=? AND g.enabled=1
+         AND e.status='active' AND julianday(e.period_end)>julianday('now')`;
+  const grant=await env.DB.prepare(grantQuery)
     .bind(identity.membership.id,identity.membership.org_id,identity.application_user_id,identity.membership.role).first();
   return !!grant;
 }
