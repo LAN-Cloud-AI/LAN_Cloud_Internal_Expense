@@ -414,3 +414,15 @@ it('removes the local people UI and keeps business ownership options after OnePa
   expect(subscriptions).toContain('/api/account-owners');
   expect(subscriptions).toContain("api.accountOwners + '?active=1'");
 });
+
+it('renders a styled OnePass entry screen without misleading identity rejection copy', () => {
+  const loginPage = ui.renderCorporateAccessRequiredUi(true, false);
+  expect(loginPage).toContain('auth-shell');
+  expect(loginPage).toContain('href="/auth/onepass"');
+  expect(loginPage).toContain('使用 OnePass 登录');
+  expect(loginPage).not.toContain('请选择已关联报销账号的组织身份');
+
+  const unmappedPage = ui.renderCorporateAccessRequiredUi(true, true);
+  expect(unmappedPage).toContain('尚未关联可用的报销账号');
+  expect(unmappedPage).toContain('action="/auth/onepass/logout"');
+});
