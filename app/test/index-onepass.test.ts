@@ -56,7 +56,7 @@ function setup() {
     session_id: crypto.randomUUID(),
     expires_at: new Date(Date.now() + 3_600_000).toISOString(),
     application_user_id: applicationUser,
-    user: { id: crypto.randomUUID(), name: 'OnePass fixture' },
+    user: { id: crypto.randomUUID(), name: 'OnePass fixture', email: 'fixture@lancloudtech.com', email_verified: true },
     membership: { id: membership, org_id: org, role: 'administrator' },
   };
   let revoked = false;
@@ -71,9 +71,11 @@ function setup() {
       const body = JSON.parse(String(init.body));
       expect(body.redirect_uri).toBe(env.ONEPASS_REDIRECT_URI);
       expect(body.code_verifier).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(body.require_email).toBe(true);
       return Response.json(identity);
     }
     expect(input.pathname).toBe('/api/integrations/v1/session/check');
+    expect(JSON.parse(String(init.body)).require_email).toBe(true);
     return Response.json(revoked ? { active: false } : identity);
   });
   const app = createApp({ resolveIdentity: async () => { throw new Error('enabled mode must use OnePass'); } });
@@ -168,7 +170,7 @@ it('validates signed organization, entitlement and member events before linking 
 });
 
 it('uses live OnePass unlimited mode without a billing entitlement while retaining organization and member checks', async () => {
-  const { db, identity, req } = setup();
+  const { db, env, identity, req } = setup();
   db.prepare('INSERT INTO onepass_org(org_id) VALUES(?)').run(org);
   db.prepare('INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id) VALUES(?,?,?,?,1,1,?)')
     .run(membership, org, applicationUser, 'administrator', crypto.randomUUID());
@@ -186,6 +188,38 @@ it('uses live OnePass unlimited mode without a billing entitlement while retaini
   identity.membership.org_id = org;
   (identity as unknown as { access_model: string }).access_model = 'invalid';
   expect((await req('/api/session', { headers })).status).toBe(401);
+  identity.access_model = 'unlimited';
+  identity.user.email_verified = false;
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  identity.user.email_verified = true;
+  identity.user.email = undefined;
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  identity.user.email = 'member@external.example';
+  expect((await req('/api/session', { headers })).status).toBe(200);
+  env.ONEPASS_REQUIRED_EMAIL_DOMAIN = 'lancloudtech.com';
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  identity.user.email = 'fixture@lancloudtech.com';
+  expect((await req('/api/session', { headers })).status).toBe(200);
+});
+
+it('rejects non-corporate emails in production mode and uses OnePass email when local user email is null', async () => {
+  const { db, env, identity, req } = setup();
+  identity.access_model = 'unlimited';
+  db.prepare('INSERT INTO onepass_org(org_id) VALUES(?)').run(org);
+  db.prepare('INSERT INTO onepass_grants(membership_id,org_id,application_user_id,role,enabled,version,event_id) VALUES(?,?,?,?,1,1,?)')
+    .run(membership, org, applicationUser, 'administrator', crypto.randomUUID());
+  db.prepare('INSERT INTO onepass_local_accounts(org_id,membership_id,user_id) VALUES(?,?,?)').run(org, membership, localUser);
+  const headers = { cookie: '__Host-onepass_session=' + identity.session_id };
+  const session = await req('/api/session', { headers });
+  expect(session.status).toBe(200);
+  expect(await session.json()).toMatchObject({ data: { email: 'fixture@lancloudtech.com' } });
+
+  env.ENVIRONMENT = 'production';
+  env.ONEPASS_ENVIRONMENT = 'production';
+  identity.user.email = 'member@external.example';
+  expect((await req('/api/session', { headers })).status).toBe(401);
+  identity.user.email = 'member@lancloudtech.com';
+  expect((await req('/api/session', { headers })).status).toBe(200);
 });
 
 it('provisions only new verified members and never claims an existing Expense account', async () => {

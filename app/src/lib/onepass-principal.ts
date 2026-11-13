@@ -13,11 +13,12 @@ export async function expensePrincipalFromOnePass(db: D1Database, identity: OneP
   if (!mapped) return null;
   const roles = membership.application_roles ?? mapped.role_codes.split(',')
     .filter((role): role is AppRole => APP_ROLES.includes(role as AppRole));
+  const email = mapped.email ?? identity.user.email;
   return {
     issuer: 'onepass',
     subject: membership.id,
     userId: mapped.user_id,
-    ...(mapped.email ? { email: mapped.email } : {}),
+    ...(email ? { email } : {}),
     roles: [...roles].sort(),
   };
 }

@@ -15,6 +15,7 @@ export interface OnePassEnv {
   ONEPASS_DELIVERY_KEY_ID?: string;
   ONEPASS_DELIVERY_SECRET?: string;
   ONEPASS_MANAGED_MEMBER_ROLES?: 'staging' | '1';
+  ONEPASS_REQUIRED_EMAIL_DOMAIN?: string;
 }
 
 export interface OnePassIdentity {
@@ -23,7 +24,7 @@ export interface OnePassIdentity {
   session_id: string;
   expires_at: string;
   application_user_id: string;
-  user: {id: string; name: string};
+  user: {id: string; name: string; email?: string; email_verified?: boolean};
   membership: {id: string; org_id: string; role: string; org_role?: string; application_roles?: AppRole[]};
 }
 
@@ -96,11 +97,18 @@ async function sessionCall(cfg:ReturnType<typeof config>,op:string,body:object) 
   return resp.json();
 }
 
+function validAuthenticatedEmail(email:unknown,env:OnePassEnv):email is string {
+  if(typeof email!=='string'||email.length>254||!/^[^@\s\x00-\x1f]+@[^@\s\x00-\x1f]+\.[^@\s\x00-\x1f]+$/.test(email)) return false;
+  const domain=env.ONEPASS_REQUIRED_EMAIL_DOMAIN?.trim().toLowerCase()||(env.ONEPASS_ENVIRONMENT==='production'?'lancloudtech.com':'');
+  return !domain||email.split('@')[1]?.toLowerCase()===domain;
+}
+
 function isIdentity(value:unknown,env:OnePassEnv):value is OnePassIdentity {
   if(!value||typeof value!=='object') return false;
   const i=value as Partial<OnePassIdentity>;
   return i.active===true&&(i.access_model===undefined||i.access_model==='subscription'||i.access_model==='unlimited')&&uuid(i.session_id)&&uuid(i.application_user_id)&&uuid(i.user?.id)&&
-    typeof i.user?.name==='string'&&uuid(i.membership?.id)&&i.membership?.org_id===env.ONEPASS_ORG_ID&&
+    typeof i.user?.name==='string'&&i.user?.email_verified===true&&validAuthenticatedEmail(i.user?.email,env)&&
+    uuid(i.membership?.id)&&i.membership?.org_id===env.ONEPASS_ORG_ID&&
     ['administrator','member'].includes(i.membership?.role??'')&&
     (i.membership?.application_roles===undefined||isApplicationRoles(i.membership.application_roles))&&
     typeof i.expires_at==='string'&&Date.parse(i.expires_at)>Date.now();
@@ -127,7 +135,7 @@ export async function onePassIdentity(request:Request,env:OnePassEnv):Promise<On
   if(new URL(request.url).origin!==cfg.redirect.origin) return null;
   const sessionId=cookie(request,'session');
   if(!uuid(sessionId)) return null;
-  const identity=await sessionCall(cfg,'check',{session_id:sessionId});
+  const identity=await sessionCall(cfg,'check',{session_id:sessionId,require_email:true});
   return isIdentity(identity,env)&&identity.session_id===sessionId&&await locallyActive(identity,env)?identity:null;
 }
 
@@ -273,7 +281,7 @@ export async function handleOnePass(request:Request,env:OnePassEnv):Promise<Resp
     const [state,verifier]=cookie(request,'transaction')?.split('.')??[];
     const code=url.searchParams.get('code');
     if(!token(state)||!token(verifier)||!token(code)||url.searchParams.get('state')!==state) return forbidden();
-    const identity=await sessionCall(cfg,'exchange',{code,redirect_uri:cfg.redirect.href,code_verifier:verifier});
+    const identity=await sessionCall(cfg,'exchange',{code,redirect_uri:cfg.redirect.href,code_verifier:verifier,require_email:true});
     if(!isIdentity(identity,env)||!await locallyActive(identity,env)) return forbidden();
     setCookie(headers,url,'transaction','',0);
     setCookie(headers,url,'session',identity.session_id,Math.min(28800,Math.max(1,Math.floor((Date.parse(identity.expires_at)-Date.now())/1000))));
